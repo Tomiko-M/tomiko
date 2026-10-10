@@ -100,14 +100,46 @@ describe("network faults", () => {
 });
 
 describe("cut streams", () => {
-  it("drops a replayed stream after the given number of events", async () => {
+  it("drops a replayed stream right after the given number of events", async () => {
+    const dir = tmpDir();
+    const events = anthropicStream(["Hel", "lo"]);
+    const send = () => globalThis.fetch(ANTHROPIC_URL, { method: "POST", body: '{"stream":true}' });
+    await cassette("cut", async () => (await send()).text(), { dir, fetch: fakeApi(() => sse(events, 9)) });
+
+    const received = await cassette(
+      "cut",
+      async () => {
+        const reader = (await send()).body!.getReader();
+        const decoder = new TextDecoder();
+        let text = "";
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) return { text, error: undefined };
+            text += decoder.decode(value, { stream: true });
+          }
+        } catch (error) {
+          return { text, error };
+        }
+      },
+      { dir, mode: "replay", fetch: offline, faults: [fault.cutStream({ afterEvents: 4 })] },
+    );
+    const wire = events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`);
+    expect(received.text).toBe(wire.slice(0, 4).join(""));
+    expect(received.error).toMatchObject({ message: "terminated" });
+  });
+
+  it("makes SDK streams fail before the end", async () => {
     const { replay } = await recorded();
     const events: string[] = [];
     const run = replay([fault.cutStream({ when: (r) => (r.body as any)?.stream === true, afterEvents: 4 })], async (client) => {
       for await (const event of client.messages.stream(params)) events.push(event.type);
     });
     await expect(run).rejects.toThrow();
-    expect(events).toEqual(["message_start", "content_block_start", "content_block_delta"]);
+    // How many of the delivered events the SDK yields before the error varies by runtime.
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.length).toBeLessThanOrEqual(4);
+    expect(events).not.toContain("message_stop");
   });
 
   it("cuts plain responses halfway", async () => {
