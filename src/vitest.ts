@@ -3,8 +3,16 @@ import { afterEach, beforeEach, expect } from "vitest";
 import { Cassette } from "./cassette.js";
 import { TomikoError } from "./errors.js";
 import { cassette } from "./index.js";
+import { matchers, type TomikoMatchers } from "./matchers.js";
 import { activate, mergeOptions, runtime } from "./runtime.js";
 import type { TomikoOptions } from "./types.js";
+
+declare module "vitest" {
+  interface Matchers<R extends void | Promise<void> = void | Promise<void>, T = unknown> extends TomikoMatchers<R> {}
+}
+
+// Importing tomiko/vitest is enough to use the matchers.
+expect.extend(matchers);
 
 interface CassetteLocation {
   dir: string;
@@ -84,4 +92,17 @@ export function setupCassettes(options: TomikoOptions = {}): void {
     deactivate();
     await opened.close();
   });
+}
+
+/**
+ * The cassette attached to the running test by setupCassettes() (or an enclosing useCassette()),
+ * for assertions: `expect(currentCassette()).toHaveCalledTool("search")`.
+ */
+export function currentCassette(): Cassette {
+  if (!runtime.active) {
+    throw new TomikoError(
+      "No cassette is active. currentCassette() works inside tests covered by setupCassettes() or inside useCassette().",
+    );
+  }
+  return runtime.active as Cassette;
 }

@@ -4,6 +4,7 @@ import type { TomikoOptions } from "./types.js";
 
 export { Cassette, resolveMode } from "./cassette.js";
 export { CassetteNotFoundError, NestedCassetteError, RequestMismatchError, TomikoError } from "./errors.js";
+export { matchers, type RequestCount, type TomikoMatchers } from "./matchers.js";
 export { defaultPricing, costOf, priceFor } from "./pricing.js";
 export { formatSummary, reports, resetReports, summary, type Summary } from "./report.js";
 export type * from "./types.js";

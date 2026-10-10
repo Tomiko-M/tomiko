@@ -1,15 +1,16 @@
 import { CassetteNotFoundError, RequestMismatchError, TomikoError } from "./errors.js";
 import {
   buildResponse,
-  collectChunks,
   encodeBody,
   isEventStream,
   parseRequestBody,
   pickHeaders,
+  recordStream,
   redactUrl,
 } from "./http.js";
 import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js";
-import { defaultPricing } from "./pricing.js";
+import { readContent } from "./inspect.js";
+import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
 import { cassettePath, loadCassette, saveCassette } from "./store.js";
 import type {
@@ -17,8 +18,10 @@ import type {
   Interaction,
   Mode,
   PricingTable,
+  RecordedCall,
   RecordedRequest,
   TomikoOptions,
+  ToolCall,
 } from "./types.js";
 import { detectProvider, extractUsage } from "./usage.js";
 
@@ -69,8 +72,11 @@ export class Cassette {
 
   private readonly used = new Set<Interaction>();
   private readonly replayed: Interaction[] = [];
+  /** Every interaction served in this run, in order, for assertions. */
+  private readonly served: { interaction: Interaction; replayed: boolean }[] = [];
   private readonly recorded: Interaction[] = [];
-  private readonly pending: Promise<void>[] = [];
+  /** Streams still being recorded; each is drained and finalized on close. */
+  private readonly pending: (() => Promise<void>)[] = [];
   private readonly warnings: string[] = [];
   private readonly pricing: PricingTable;
   private readonly ignore: string[];
@@ -110,6 +116,37 @@ export class Cassette {
     return this.report !== undefined;
   }
 
+  /**
+   * Requests served so far in this run, in order. Read live from the responses, so a stream that
+   * is still being recorded contributes everything the caller has read from it.
+   */
+  get calls(): RecordedCall[] {
+    return this.served.map(({ interaction, replayed }) => {
+      const { request, response } = interaction;
+      const { model: responseModel, usage } = extractUsage(response.body);
+      const requestModel = modelOf(request.body);
+      const model = responseModel ?? (typeof requestModel === "string" ? requestModel : undefined);
+      const price = model && usage ? priceFor(model, this.pricing) : undefined;
+      return {
+        method: request.method,
+        url: request.url,
+        requestBody: request.body,
+        status: response.status,
+        replayed,
+        provider: detectProvider(request.url),
+        model,
+        usage,
+        cost: usage && price ? costOf(usage, price) : null,
+        ...readContent(response.body),
+      };
+    });
+  }
+
+  /** Every tool call the model made in this run, in order. */
+  get toolCalls(): ToolCall[] {
+    return this.calls.flatMap((call) => call.toolCalls);
+  }
+
   private async handle(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
     const request = new Request(input, init);
@@ -128,6 +165,7 @@ export class Cassette {
       if (found.match) {
         if (found.warning) this.warnings.push(found.warning);
         this.replayed.push(found.match);
+        this.served.push({ interaction: found.match, replayed: true });
         return buildResponse(found.match.response, request.url);
       }
       if (this.mode === "replay") {
@@ -209,21 +247,21 @@ export class Cassette {
     };
     this.interactions.push(interaction);
     this.recorded.push(interaction);
+    this.served.push({ interaction, replayed: false });
     this.used.add(interaction);
     const init = { status: res.status, statusText: res.statusText, headers: liveHeaders(res.headers) };
 
     if (isEventStream(contentType) && res.body) {
-      // Tee the stream: the caller consumes it live while tomiko copies every chunk.
       const chunks: string[] = [];
       interaction.response.body = { type: "sse", chunks };
-      const [mine, theirs] = res.body.tee();
-      this.pending.push(
-        collectChunks(mine, chunks).then(
-          () => this.finish(interaction, started),
+      const { stream, settle } = recordStream(res.body, chunks);
+      this.pending.push(() =>
+        settle().then(
+          (endedAt) => this.finish(interaction, started, endedAt),
           (error: unknown) => this.discard(interaction, error),
         ),
       );
-      return withUrl(new Response(theirs, init), request.url);
+      return withUrl(new Response(stream, init), request.url);
     }
 
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -233,7 +271,7 @@ export class Cassette {
     return withUrl(new Response(body, init), request.url);
   }
 
-  private finish(interaction: Interaction, started: number): void {
+  private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {
     const { model, usage } = extractUsage(interaction.response.body);
     const body = interaction.request.body as { model?: unknown } | undefined;
     const requestModel = typeof body?.model === "string" ? body.model : undefined;
@@ -242,7 +280,7 @@ export class Cassette {
       model: model ?? requestModel,
       usage,
       recordedAt: interaction.meta.recordedAt,
-      durationMs: Date.now() - started,
+      durationMs: endedAt - started,
     };
   }
 
@@ -260,7 +298,7 @@ export class Cassette {
   /** Waits for in-flight stream recordings, saves new recordings, and returns the run report. */
   async close(): Promise<CassetteReport> {
     if (this.report) return this.report;
-    await Promise.all(this.pending);
+    await Promise.all(this.pending.map((settle) => settle()));
     const saved = this.recorded.some((i) => this.interactions.includes(i));
     if (saved) {
       const redact = this.options.redact;

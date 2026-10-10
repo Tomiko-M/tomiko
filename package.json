@@ -48,7 +48,9 @@
   "files": [
     "dist"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/vitest.js"
+  ],
   "engines": {
     "node": ">=20"
   },

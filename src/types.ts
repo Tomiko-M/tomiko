@@ -106,3 +106,28 @@ export interface CassetteReport {
   warnings: string[];
   saved: boolean;
 }
+
+/** A tool the model asked to call. */
+export interface ToolCall {
+  name: string;
+  /** Parsed arguments; raw text if they were not valid JSON. */
+  input: unknown;
+  id?: string;
+}
+
+/** One request a cassette served during this run, recorded or replayed, as seen by assertions. */
+export interface RecordedCall {
+  method: string;
+  url: string;
+  requestBody: unknown;
+  status: number;
+  replayed: boolean;
+  provider?: string;
+  model?: string;
+  usage?: Usage;
+  /** Estimated USD cost, or null when there is no usage or no price for the model. */
+  cost: number | null;
+  /** The model's text output. */
+  text: string;
+  toolCalls: ToolCall[];
+}

@@ -98,16 +98,63 @@ export function buildResponse(recorded: RecordedResponse, url: string): Response
   return response;
 }
 
-/** Reads a stream to the end, collecting decoded text chunks as they arrive. */
-export async function collectChunks(stream: ReadableStream<Uint8Array>, into: string[]): Promise<void> {
-  const reader = stream.getReader();
+export interface RecordedStream {
+  /** The stream to hand to the caller: the same bytes, in the same chunks, as the source. */
+  stream: ReadableStream<Uint8Array>;
+  /** Reads whatever the caller left unread; resolves with the time the source ended. */
+  settle(): Promise<number>;
+}
+
+/**
+ * Passes `source` through to the caller while copying each chunk into `chunks` as it is read, so
+ * everything the caller has seen is already recorded. A caller that stops early (or never reads)
+ * doesn't truncate the recording: `settle()` drains the rest.
+ */
+export function recordStream(source: ReadableStream<Uint8Array>, chunks: string[]): RecordedStream {
+  const reader = source.getReader();
   const decoder = new TextDecoder();
-  for (;;) {
+  let endedAt: number | undefined;
+  let failure: { error: unknown } | undefined;
+
+  // reader.read() calls resolve in the order they were made, so chunks stay in order even if the
+  // caller and settle() read concurrently.
+  const pump = async (): Promise<Uint8Array | undefined> => {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) {
+      const rest = decoder.decode();
+      if (rest) chunks.push(rest);
+      endedAt ??= Date.now();
+      return undefined;
+    }
     const text = decoder.decode(value, { stream: true });
-    if (text) into.push(text);
-  }
-  const rest = decoder.decode();
-  if (rest) into.push(rest);
+    if (text) chunks.push(text);
+    return value;
+  };
+
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const value = await pump();
+          if (value) controller.enqueue(value);
+          else controller.close();
+        } catch (error) {
+          failure = { error };
+          controller.error(error);
+        }
+      },
+      // Keep the source open: settle() still reads it to the end for the recording.
+      cancel() {},
+    },
+    { highWaterMark: 0 },
+  );
+
+  return {
+    stream,
+    async settle() {
+      if (failure) throw failure.error;
+      while (endedAt === undefined) await pump();
+      return endedAt;
+    },
+  };
 }

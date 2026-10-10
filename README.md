@@ -101,6 +101,71 @@ so they don't work with `test.concurrent`.
 
 `tomiko/vitest` is ESM only, as Vitest is, and needs Vitest 1 or newer.
 
+### Assert what the agent did
+
+The final answer is only part of an agent's behavior. tomiko sees every request and response, so
+you can assert on the steps: which tools the model called and with what arguments, how many
+requests it took, which model ran, and what it cost. Importing `tomiko/vitest` registers the
+matchers:
+
+```ts
+import { useCassette } from "tomiko/vitest";
+
+test("books a table", async () => {
+  await useCassette(async (c) => {
+    await agent.run("Book a table for two at 7pm");
+
+    expect(c).toHaveCalledTool("book_table", { guests: 2 });
+    expect(c).not.toHaveCalledTool("cancel_booking");
+    expect(c).toHaveCalledToolsInOrder(["search_tables", "book_table"]);
+    expect(c).toHaveMadeRequests({ max: 5 }); // no runaway loops
+    expect(c).toCostLessThan(0.05);           // USD, estimated
+  });
+});
+```
+
+| Matcher                              | Passes when                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| `toHaveCalledTool(name, input?)`     | The model called the tool; `input` must be contained in its arguments           |
+| `toHaveCalledToolTimes(name, n)`     | The tool was called exactly `n` times                                           |
+| `toHaveCalledToolsInOrder(names)`    | The tools were called in this relative order, other calls allowed in between    |
+| `toHaveMadeRequests(n \| {min,max})` | The number of requests is `n`, or within the range                              |
+| `toHaveUsedModel(model \| regex)`    | At least one request went to the model                                          |
+| `toCostLessThan(usd)`                | The estimated cost is below `usd`; fails loudly if a model has no known price   |
+| `toHaveUsedFewerTokensThan(n)`       | Input, output and cache tokens add up to fewer than `n`                         |
+
+`input` is compared recursively and may contain asymmetric matchers:
+`{ table: expect.any(Number), note: expect.stringMatching(/window/) }`. A failure lists the calls
+that were made:
+
+```
+expected cassette "booking.test.ts/books a table" to call tool "cancel_booking".
+Tool calls:
+  search_tables({"time":"19:00","guests":2})
+  book_table({"table":12,"guests":2,"note":"window"})
+```
+
+Tool calls and text are read from Anthropic Messages, OpenAI Chat Completions and OpenAI Responses,
+streamed or not, with tool arguments reassembled from stream fragments. They work the same whether
+the cassette is recording or replaying.
+
+With `setupCassettes()`, get the test's cassette with `currentCassette()`. For your own checks,
+`c.calls` lists every request with its model, usage, cost, text and tool calls, and `c.toolCalls`
+lists every tool call in order.
+
+**Jest:** register the matchers yourself with `import { matchers } from "tomiko"` and
+`expect.extend(matchers)`; they use the standard `expect.extend` API.
+
+**Vitest before v5:** matcher types are declared for Vitest 5. On older versions, declare them in
+your project the way your Vitest version's custom matcher docs describe, for example:
+
+```ts
+import type { TomikoMatchers } from "tomiko";
+declare module "vitest" {
+  interface Assertion<T = any> extends TomikoMatchers<void> {}
+}
+```
+
 ### Clients created at module load
 
 SDK clients capture `fetch` when they are constructed. If you build a client once, outside the
@@ -275,7 +340,8 @@ code that changed it.
 
 ## Roadmap
 
-- Test-name based cassette naming for Jest
+- Fault injection: replay with rate limits, overloads and broken streams to test retry logic
+- First-class Jest support: test-name based cassettes and matcher types
 - Simulated streaming latency for UI tests
 - `tomiko prune` to drop recordings no test used
 - MCP (Model Context Protocol) traffic over stdio
