@@ -316,6 +316,27 @@ configure({ ignore: ["metadata.user_id", "messages.*.cache_control"] });
 
 Paths use dots, and `*` matches every key or array index. JSON key order never matters.
 
+## Browse your cassettes
+
+```sh
+npx tomiko view
+```
+
+builds a single HTML page from every `__cassettes__` directory in the project and opens it: each
+request as a conversation, with the system prompt, tools, tool calls and results, the response,
+and the tokens, cost and time of every step. History an agent sends again on each step is folded
+away, so every step shows only what is new.
+
+![tomiko view: an agent run as a conversation, with tool calls, results and per-step cost](docs/viewer.png)
+
+The page is self-contained, with no server and nothing loaded from the network, so it works as a
+CI artifact or attached to a bug report. Cassette content is rendered as text, never as HTML.
+
+```sh
+npx tomiko view recordings/          # a directory outside __cassettes__, searched in full
+npx tomiko view --out report.html --no-open
+```
+
 ## Cost report
 
 Every cassette produces a report, and `summary()` / `formatSummary()` aggregate the ones closed in

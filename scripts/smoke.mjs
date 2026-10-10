@@ -1,6 +1,7 @@
 // Exercises the built package without a test runner, so it can run on every supported Node version.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cassette, summary } from "../dist/index.js";
@@ -35,4 +36,12 @@ assert.equal(s.recorded, 1);
 assert.equal(s.replayed, 1);
 // Usage counts every served response: the recorded one and its replay.
 assert.deepEqual(s.usage, { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 });
+// The CLI builds a viewer page from the cassette just recorded.
+const page = join(dir, "view.html");
+const output = execFileSync(process.execPath, [new URL("../dist/cli.js", import.meta.url).pathname, "view", dir, "--no-open", "--out", page], {
+  encoding: "utf8",
+});
+assert.match(output, /1 cassette, 1 request → /);
+assert.match(readFileSync(page, "utf8"), /claude-opus-5-5/);
+
 console.log(`smoke ok on node ${process.version}`);
