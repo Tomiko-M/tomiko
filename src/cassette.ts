@@ -149,7 +149,7 @@ export class Cassette {
         status: response.status,
         replayed,
         fault,
-        provider: detectProvider(request.url),
+        provider: interaction.meta.provider ?? detectProvider(request.url),
         model,
         usage,
         cost: usage && price ? costOf(usage, price) : null,
@@ -220,14 +220,14 @@ export class Cassette {
     const interaction: Interaction = {
       request: recordedRequest,
       response: { status: 0, headers: {}, body: { type: "empty" } },
-      meta: { recordedAt: new Date().toISOString(), durationMs: 0 },
+      meta: { provider: detectProvider(request.url, request.headers), recordedAt: new Date().toISOString(), durationMs: 0 },
     };
     this.served.push({ interaction, replayed: false, fault: f.name });
     if (f.name === "network_error") throw networkError(f.message);
     if (f.name !== "rate_limit" && f.name !== "overloaded" && f.name !== "server_error") {
       throw new TomikoError(`Fault "${f.name}" cannot fail a request.`);
     }
-    const { status, body } = errorResponse(f.name, detectProvider(request.url));
+    const { status, body } = errorResponse(f.name, interaction.meta.provider);
     interaction.response = {
       status,
       headers: {
@@ -303,7 +303,7 @@ export class Cassette {
         headers: pickHeaders(res.headers),
         body: { type: "empty" },
       },
-      meta: { recordedAt: new Date().toISOString(), durationMs: 0 },
+      meta: { provider: detectProvider(request.url, request.headers), recordedAt: new Date().toISOString(), durationMs: 0 },
     };
     this.interactions.push(interaction);
     this.recorded.push(interaction);
@@ -337,7 +337,7 @@ export class Cassette {
     const body = interaction.request.body as { model?: unknown } | undefined;
     const requestModel = typeof body?.model === "string" ? body.model : undefined;
     interaction.meta = {
-      provider: detectProvider(interaction.request.url),
+      provider: interaction.meta.provider,
       model: model ?? requestModel,
       usage,
       recordedAt: interaction.meta.recordedAt,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cassette, costOf, formatSummary, priceFor, defaultPricing, reports, summary } from "../src/index.js";
-import { extractUsage } from "../src/usage.js";
+import { detectProvider, extractUsage } from "../src/usage.js";
 import { ANTHROPIC_URL, anthropicMessage, anthropicStream, fakeApi, json, sse, tmpDir } from "./helpers.js";
 
 const chunksOf = (events: { event?: string; data: unknown }[]) =>
@@ -55,6 +55,19 @@ describe("usage extraction", () => {
   it("returns nothing for responses without usage", () => {
     expect(extractUsage({ type: "json", value: { hello: "world" } })).toEqual({});
     expect(extractUsage({ type: "sse", chunks: ["data: [DONE]\n\n"] })).toEqual({});
+  });
+});
+
+describe("detectProvider", () => {
+  it("knows the APIs by host, by the Anthropic SDK's header, and by path behind a proxy", () => {
+    expect(detectProvider("https://api.anthropic.com/v1/messages")).toBe("anthropic");
+    expect(detectProvider("https://api.openai.com/v1/responses")).toBe("openai");
+    expect(detectProvider("https://gateway.local/x", new Headers({ "anthropic-version": "2023-06-01" }))).toBe("anthropic");
+    expect(detectProvider("https://gateway.local/anthropic/v1/messages")).toBe("anthropic");
+    expect(detectProvider("https://gateway.local/v1/messages/count_tokens")).toBe("anthropic");
+    expect(detectProvider("https://gateway.local/openai/v1/chat/completions")).toBe("openai");
+    expect(detectProvider("https://gateway.local/v1/embeddings")).toBe("gateway.local");
+    expect(detectProvider("not a url")).toBeUndefined();
   });
 });
 

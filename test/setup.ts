@@ -7,6 +7,9 @@ globalThis.fetch = async (input) => {
   throw new Error(`Test tried to reach the network: ${url}`);
 };
 
+// SDK clients read these at construction; a developer's own settings must not change the tests.
+for (const key of ["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"]) delete process.env[key];
+
 // Tests choose their mode explicitly; the runner's own CI/TOMIKO_MODE must not leak in.
 const saved = { CI: process.env.CI, TOMIKO_MODE: process.env.TOMIKO_MODE };
 
