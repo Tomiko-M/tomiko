@@ -1,0 +1,96 @@
+{
+  "name": "tomiko",
+  "version": "0.1.0",
+  "description": "Record & replay LLM API calls in tests. Zero tokens, millisecond runs, deterministic CI.",
+  "keywords": [
+    "llm",
+    "testing",
+    "record",
+    "replay",
+    "vcr",
+    "cassette",
+    "mock",
+    "anthropic",
+    "claude",
+    "openai",
+    "agents",
+    "fetch",
+    "vercel-ai-sdk",
+    "ai-sdk",
+    "langchain",
+    "tool-calling",
+    "vitest"
+  ],
+  "license": "MIT",
+  "author": "saykachi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saykachi/tomiko.git"
+  },
+  "homepage": "https://github.com/saykachi/tomiko#readme",
+  "bugs": "https://github.com/saykachi/tomiko/issues",
+  "type": "module",
+  "bin": {
+    "tomiko": "./dist/cli.js"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./vitest": {
+      "types": "./dist/vitest.d.ts",
+      "import": "./dist/vitest.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": [
+    "./dist/vitest.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run smoke",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "peerDependencies": {
+    "vitest": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ai-sdk/anthropic": "^4.0.78",
+    "@ai-sdk/openai": "^4.0.91",
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@langchain/anthropic": "^1.5.12",
+    "@langchain/core": "^1.2.17",
+    "@langchain/openai": "^1.6.2",
+    "@types/node": "^26.6.5",
+    "ai": "^7.0.137",
+    "openai": "^7.32.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3",
+    "zod": "^4.6.5"
+  }
+}

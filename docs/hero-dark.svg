@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-label="tomiko: record and replay LLM API calls in your tests">
+  <rect x="1" y="1" width="1198" height="378" rx="24" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+  <text x="70" y="160" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="96" font-weight="800" letter-spacing="-3" fill="#e6edf3">tomiko<tspan fill="#f0885b">.</tspan></text>
+  <text x="74" y="212" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" font-weight="600" fill="#e6edf3">Record &amp; replay LLM calls in your tests.</text>
+  <text x="74" y="246" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#9198a1">Test agents offline: no tokens, no flakes, no API keys in CI.</text>
+  <g><rect x="74" y="262" width="101.6" height="34" rx="17" fill="#3a261d"/><text x="88" y="285" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#f0885b">0 tokens</text></g><g><rect x="196" y="262" width="138.39999999999998" height="34" rx="17" fill="#3a261d"/><text x="210" y="285" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#f0885b">milliseconds</text></g><g><rect x="348" y="262" width="147.6" height="34" rx="17" fill="#3a261d"/><text x="362" y="285" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#f0885b">deterministic</text></g>
+  
+  <g transform="rotate(-4 950 190)">
+    <rect x="760" y="70" width="380" height="240" rx="18" fill="#2b2622" stroke="#4a413a" stroke-width="2"/>
+    <rect x="782" y="90" width="336" height="152" rx="10" fill="#efe6d8"/>
+    <rect x="782" y="90" width="336" height="16" rx="8" fill="#f0885b"/>
+    <rect x="782" y="98" width="336" height="8" fill="#f0885b"/>
+    <text x="800" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#2a2623">agent/booking.test.ts</text>
+    <line x1="800" y1="142" x2="1100" y2="142" stroke="#d8cab4" stroke-width="2"/>
+    <rect x="855" y="154" width="190" height="58" rx="29" fill="#0f1318"/>
+    <circle cx="888" cy="183" r="27" fill="#161b22"/><circle cx="888" cy="183" r="21" fill="none" stroke="#efe6d8" stroke-width="3"/><line x1="873" y1="183" x2="903" y2="183" stroke="#efe6d8" stroke-width="4" stroke-linecap="round"/><line x1="880.5" y1="170.00961894323342" x2="895.5" y2="195.99038105676658" stroke="#efe6d8" stroke-width="4" stroke-linecap="round"/><line x1="895.5" y1="170.00961894323342" x2="880.5" y2="195.99038105676658" stroke="#efe6d8" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="1012" cy="183" r="27" fill="#161b22"/><circle cx="1012" cy="183" r="21" fill="none" stroke="#efe6d8" stroke-width="3"/><line x1="997" y1="183" x2="1027" y2="183" stroke="#efe6d8" stroke-width="4" stroke-linecap="round"/><line x1="1004.5" y1="170.00961894323342" x2="1019.5" y2="195.99038105676658" stroke="#efe6d8" stroke-width="4" stroke-linecap="round"/><line x1="1019.5" y1="170.00961894323342" x2="1004.5" y2="195.99038105676658" stroke="#efe6d8" stroke-width="4" stroke-linecap="round"/>
+    <rect x="918" y="174" width="64" height="18" rx="3" fill="#6b5a4c" opacity="0.8"/>
+    <path d="M 830 310 L 852 264 L 1048 264 L 1070 310 Z" fill="#4a413a"/>
+    <circle cx="890" cy="290" r="6" fill="#2b2622"/>
+    <circle cx="1010" cy="290" r="6" fill="#2b2622"/>
+    <circle cx="778" cy="292" r="5" fill="#4a413a"/>
+    <circle cx="1122" cy="292" r="5" fill="#4a413a"/>
+  </g>
+</svg>
