@@ -57,6 +57,21 @@ describe("HTTP error faults", () => {
     expect(await res.json()).toMatchObject({ error: { code: "rate_limit_exceeded" } });
   });
 
+  it("uses the API's error format behind a proxy or custom base URL", async () => {
+    const proxy = "https://llm-proxy.example.com";
+    const anthropic = cassette("proxy-anthropic", () => new Anthropic({ apiKey: "k", maxRetries: 0, baseURL: proxy }).messages.create(params), {
+      dir: tmpDir(),
+      faults: [fault.overloaded()],
+    });
+    await expect(anthropic).rejects.toMatchObject({ status: 529, error: { error: { type: "overloaded_error" } } });
+
+    const openai = await cassette("proxy-openai", () => globalThis.fetch(`${proxy}/v1/chat/completions`, { method: "POST" }), {
+      dir: tmpDir(),
+      faults: [fault.overloaded()],
+    });
+    expect(openai.status).toBe(503);
+  });
+
   it("records what happened, for assertions", async () => {
     await useCassette(
       async (c) => {

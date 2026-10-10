@@ -101,15 +101,23 @@ export function extractUsage(body: RecordedBody): Extracted {
   return { model, usage };
 }
 
-export function detectProvider(url: string): string | undefined {
-  let host: string;
+/**
+ * The API a request is for. The Anthropic SDK always sends `anthropic-version`; without headers,
+ * the host decides, and behind a proxy or gateway (a custom base URL) the API's path still does.
+ */
+export function detectProvider(url: string, headers?: Headers): string | undefined {
+  if (headers?.has("anthropic-version")) return "anthropic";
+  let parsed: URL;
   try {
-    host = new URL(url).hostname;
+    parsed = new URL(url);
   } catch {
     return undefined;
   }
+  const host = parsed.hostname;
   if (host.endsWith("anthropic.com")) return "anthropic";
   if (host.endsWith("openai.com")) return "openai";
   if (host.endsWith("generativelanguage.googleapis.com")) return "google";
+  if (/\/v1\/messages(\/|$)/.test(parsed.pathname)) return "anthropic";
+  if (/\/(chat\/completions|responses)$/.test(parsed.pathname)) return "openai";
   return host;
 }
