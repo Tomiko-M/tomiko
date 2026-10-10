@@ -1,0 +1,41 @@
+name: Release
+
+# Publishes to npm when a GitHub release is published. npm trusts this workflow directly
+# (trusted publishing), so no npm token is stored; see RELEASING.md for the one-time setup.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # lets npm verify this workflow and sign provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Update npm (trusted publishing needs 11.5.1 or newer)
+        run: npm install -g npm@latest
+      - run: npm ci
+      - name: Check the release tag matches package.json
+        run: |
+          expected="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match package.json version $expected"
+            exit 1
+          fi
+      # prepublishOnly runs the typecheck, tests, build and smoke test before anything is uploaded.
+      # Pre-releases (1.2.0-beta.1) go to the `next` tag so `npm install tomiko` keeps the stable one.
+      - name: Publish
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            npm publish --access public --tag next
+          else
+            npm publish --access public
+          fi
