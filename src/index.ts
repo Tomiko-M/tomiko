@@ -1,5 +1,5 @@
 import { Cassette } from "./cassette.js";
-import { NestedCassetteError } from "./errors.js";
+import { activate, assertNoActiveCassette, mergeOptions, runtime } from "./runtime.js";
 import type { TomikoOptions } from "./types.js";
 
 export { Cassette, resolveMode } from "./cassette.js";
@@ -8,20 +8,13 @@ export { defaultPricing, costOf, priceFor } from "./pricing.js";
 export { formatSummary, reports, resetReports, summary, type Summary } from "./report.js";
 export type * from "./types.js";
 
-let defaults: TomikoOptions = {};
-let active: Cassette | undefined;
-
-function merge(base: TomikoOptions, extra: TomikoOptions = {}): TomikoOptions {
-  return { ...base, ...extra, pricing: { ...base.pricing, ...extra.pricing } };
-}
-
 /** Sets defaults for every cassette opened afterwards, e.g. in a test setup file. */
 export function configure(options: TomikoOptions): void {
-  defaults = merge(defaults, options);
+  runtime.defaults = mergeOptions(runtime.defaults, options);
 }
 
 export function resetConfig(): void {
-  defaults = {};
+  runtime.defaults = {};
 }
 
 /**
@@ -29,7 +22,7 @@ export function resetConfig(): void {
  * (e.g. `new Anthropic({ fetch: c.fetch })`) and call `close()` when done to save it.
  */
 export function openCassette(name: string, options?: TomikoOptions): Promise<Cassette> {
-  return Cassette.open(name, merge(defaults, options));
+  return Cassette.open(name, mergeOptions(runtime.defaults, options));
 }
 
 /**
@@ -41,11 +34,9 @@ export async function cassette<T>(
   fn: (cassette: Cassette) => T | Promise<T>,
   options?: TomikoOptions,
 ): Promise<T> {
-  if (active) throw new NestedCassetteError(active.name, name);
+  assertNoActiveCassette(name);
   const c = await openCassette(name, options);
-  const original = globalThis.fetch;
-  active = c;
-  globalThis.fetch = c.fetch;
+  const deactivate = activate(c);
 
   let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
@@ -53,8 +44,7 @@ export async function cassette<T>(
   } catch (error) {
     outcome = { ok: false, error };
   } finally {
-    globalThis.fetch = original;
-    active = undefined;
+    deactivate();
   }
 
   try {
@@ -74,7 +64,7 @@ const nativeFetch = globalThis.fetch;
  * Hand it to clients created once at module load: `new Anthropic({ fetch })`.
  */
 export const fetch: typeof globalThis.fetch = (input, init) => {
-  if (active) return active.fetch(input, init);
+  if (runtime.active) return runtime.active.fetch(input, init);
   const current = globalThis.fetch === fetch ? nativeFetch : globalThis.fetch;
   return current(input, init);
 };

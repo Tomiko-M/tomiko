@@ -63,6 +63,44 @@ test("summarizes a ticket", async () => {
 });
 ```
 
+### Vitest: name cassettes after the test
+
+`tomiko/vitest` names each cassette after the running test, so there is nothing to invent, nothing
+to copy-paste wrong, and renaming a test renames its cassette. Cassettes are stored next to the test
+file, like snapshots, with one directory level per `describe` block:
+
+```ts
+import { useCassette } from "tomiko/vitest";
+
+describe("agent", () => {
+  test("books a table", async () => {
+    // → __cassettes__/booking.test.ts/agent/books-a-table.json
+    await useCassette(async () => {
+      const result = await agent.run("Book a table for two at 7pm");
+      expect(result.toolCalls).toContainEqual(expect.objectContaining({ name: "book_table" }));
+    });
+  });
+});
+```
+
+Need two cassettes in one test? Give each a suffix: `useCassette("second turn", fn)`.
+
+Or skip the wrapper and give every test a cassette with one line in a setup file:
+
+```ts
+// vitest.setup.ts  (add it to `test.setupFiles` in vitest.config.ts)
+import { setupCassettes } from "tomiko/vitest";
+
+setupCassettes();
+```
+
+Tests that make no requests leave no file behind, and in `replay` mode they pass without one: a
+missing cassette only fails a test when it actually sends a request. `setupCassettes()` can also be
+called inside a `describe` block to cover only that block. Both helpers patch the global `fetch`,
+so they don't work with `test.concurrent`.
+
+`tomiko/vitest` is ESM only, as Vitest is, and needs Vitest 1 or newer.
+
 ### Clients created at module load
 
 SDK clients capture `fetch` when they are constructed. If you build a client once, outside the
@@ -103,6 +141,9 @@ the environment, which overrides both:
 ```sh
 TOMIKO_MODE=record npm test   # refresh every cassette
 ```
+
+A cassette missing in `replay` mode fails on the first request that needs it, with
+`CassetteNotFoundError`.
 
 Identical requests are served in the order they were recorded, so an agent that sends the same
 request twice gets both recorded answers back.
@@ -181,7 +222,7 @@ Models without a price are listed in the report instead of being silently counte
 
 | Option      | Default              | Description                                                                 |
 | ----------- | -------------------- | --------------------------------------------------------------------------- |
-| `dir`       | `"__cassettes__"`    | Where cassettes are stored. Names may contain `/` to create subdirectories. |
+| `dir`       | `"__cassettes__"`    | Where cassettes are stored. `tomiko/vitest` defaults to next to each test.  |
 | `mode`      | `auto` / `replay`    | See [Modes](#modes).                                                        |
 | `fuzzy`     | `false`              | Similarity threshold in (0, 1] for replaying near matches.                  |
 | `ignore`    | `[]`                 | Request body paths left out of matching.                                    |
@@ -234,7 +275,7 @@ code that changed it.
 
 ## Roadmap
 
-- Test-name based cassette naming for Vitest and Jest
+- Test-name based cassette naming for Jest
 - Simulated streaming latency for UI tests
 - `tomiko prune` to drop recordings no test used
 - MCP (Model Context Protocol) traffic over stdio

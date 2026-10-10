@@ -4,11 +4,19 @@ import { dirname, join, resolve } from "node:path";
 import { TomikoError } from "./errors.js";
 import type { CassetteFile } from "./types.js";
 
-/** `"agent/booking flow"` → `<dir>/agent/booking-flow.json`. Slashes create subdirectories. */
+/**
+ * `"agent/booking flow"` → `<dir>/agent/booking-flow.json`. Slashes create subdirectories; letters
+ * in any script are kept, and `..` cannot escape the directory.
+ */
 export function cassettePath(dir: string, name: string): string {
   const segments = name
     .split("/")
-    .map((s) => s.trim().replace(/[^\w.-]+/g, "-").replace(/^\.+/, ""))
+    .map((s) =>
+      s
+        .trim()
+        .replace(/[^\p{L}\p{N}_.-]+/gu, "-")
+        .replace(/^[.-]+|-+$/g, ""),
+    )
     .filter(Boolean);
   if (segments.length === 0) throw new TomikoError(`Invalid cassette name: "${name}"`);
   return join(resolve(dir), ...segments) + ".json";

@@ -77,6 +77,8 @@ export class Cassette {
   private readonly fuzzy: number | false;
   private readonly baseFetch: typeof globalThis.fetch;
   private report: CassetteReport | undefined;
+  /** Replay mode without a file only fails once a request needs it, so tests without LLM calls pass. */
+  private missing = false;
 
   private constructor(
     readonly name: string,
@@ -99,8 +101,9 @@ export class Cassette {
     const mode = resolveMode(options.mode);
     const file = cassettePath(options.dir ?? "__cassettes__", name);
     const existing = mode === "record" ? undefined : await loadCassette(file);
-    if (mode === "replay" && !existing) throw new CassetteNotFoundError(file);
-    return new Cassette(name, file, mode, existing?.interactions ?? [], options);
+    const cassette = new Cassette(name, file, mode, existing?.interactions ?? [], options);
+    cassette.missing = mode === "replay" && !existing;
+    return cassette;
   }
 
   get closed(): boolean {
@@ -111,6 +114,7 @@ export class Cassette {
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
     const request = new Request(input, init);
     if (this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
+    if (this.missing) throw new CassetteNotFoundError(this.file);
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {

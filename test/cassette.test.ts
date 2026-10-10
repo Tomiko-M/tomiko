@@ -207,16 +207,22 @@ describe("mismatches", () => {
 });
 
 describe("modes and lifecycle", () => {
-  it("throws when a cassette is missing in replay mode", async () => {
-    await expect(cassette("missing", () => {}, { dir: tmpDir(), mode: "replay" })).rejects.toBeInstanceOf(
+  it("fails on the first request when a cassette is missing in replay mode", async () => {
+    const dir = tmpDir();
+    await expect(cassette("missing", () => post({ x: 1 }), { dir, mode: "replay" })).rejects.toBeInstanceOf(
       CassetteNotFoundError,
     );
+    // A test that never sends a request has nothing to replay, so it passes.
+    await expect(cassette("missing", () => "no calls", { dir, mode: "replay" })).resolves.toBe("no calls");
   });
 
   it("defaults to replay on CI, and TOMIKO_MODE overrides everything", async () => {
     const dir = tmpDir();
     process.env.CI = "true";
-    await expect(openCassette("ci", { dir })).rejects.toBeInstanceOf(CassetteNotFoundError);
+    const onCI = await openCassette("ci", { dir });
+    expect(onCI.mode).toBe("replay");
+    await expect(onCI.fetch(ANTHROPIC_URL, { method: "POST" })).rejects.toBeInstanceOf(CassetteNotFoundError);
+    await onCI.close();
 
     process.env.TOMIKO_MODE = "record";
     const c = await openCassette("ci", { dir, mode: "replay" });
@@ -253,6 +259,13 @@ describe("modes and lifecycle", () => {
     const dir = tmpDir();
     const c = await openCassette("../../etc/agent flow", { dir });
     expect(c.file).toBe(join(dir, "etc", "agent-flow.json"));
+    await c.close();
+  });
+
+  it("keeps letters from any script in cassette names", async () => {
+    const dir = tmpDir();
+    const c = await openCassette("агент > бронирует столик: 2 места?", { dir });
+    expect(c.file).toBe(join(dir, "агент-бронирует-столик-2-места.json"));
     await c.close();
   });
 

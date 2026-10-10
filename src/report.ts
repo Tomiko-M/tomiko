@@ -1,4 +1,5 @@
 import { costOf, priceFor } from "./pricing.js";
+import { runtime } from "./runtime.js";
 import type { CassetteReport, Interaction, Mode, PricingTable, Usage } from "./types.js";
 import { addUsage, emptyUsage } from "./usage.js";
 
@@ -54,19 +55,18 @@ export function buildReport(input: ReportInput): CassetteReport {
   };
 }
 
-const history: CassetteReport[] = [];
-
+/** Cassettes that served nothing (e.g. auto-attached to a test without LLM calls) are left out. */
 export function recordReport(report: CassetteReport): void {
-  history.push(report);
+  if (report.replayed + report.recorded > 0 || report.warnings.length > 0) runtime.reports.push(report);
 }
 
-/** Reports of every cassette closed in this process, oldest first. */
+/** Reports of every cassette closed in this process that served at least one request, oldest first. */
 export function reports(): readonly CassetteReport[] {
-  return history;
+  return runtime.reports;
 }
 
 export function resetReports(): void {
-  history.length = 0;
+  runtime.reports.length = 0;
 }
 
 export interface Summary {
@@ -83,7 +83,7 @@ export interface Summary {
 const sumNullable = (values: (number | null)[]) =>
   values.some((v) => v !== null) ? values.reduce<number>((acc, v) => acc + (v ?? 0), 0) : null;
 
-export function summary(list: readonly CassetteReport[] = history): Summary {
+export function summary(list: readonly CassetteReport[] = runtime.reports): Summary {
   return {
     cassettes: list.length,
     replayed: list.reduce((n, r) => n + r.replayed, 0),
