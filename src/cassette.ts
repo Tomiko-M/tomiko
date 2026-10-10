@@ -1,4 +1,5 @@
 import { CassetteNotFoundError, RequestMismatchError, TomikoError } from "./errors.js";
+import { type Fault, type FaultName, FaultPlan, cutResponse, delay, errorResponse, networkError } from "./faults.js";
 import {
   buildResponse,
   encodeBody,
@@ -60,6 +61,17 @@ function withUrl(response: Response, url: string): Response {
   return response;
 }
 
+interface ServedEntry {
+  interaction: Interaction;
+  replayed: boolean;
+  fault?: FaultName;
+}
+
+interface Served {
+  response: Response;
+  entry: ServedEntry;
+}
+
 interface Lookup {
   match?: Interaction;
   warning?: string;
@@ -72,8 +84,9 @@ export class Cassette {
 
   private readonly used = new Set<Interaction>();
   private readonly replayed: Interaction[] = [];
-  /** Every interaction served in this run, in order, for assertions. */
-  private readonly served: { interaction: Interaction; replayed: boolean }[] = [];
+  /** Every request handled in this run, in order, for assertions. */
+  private readonly served: ServedEntry[] = [];
+  private readonly faultPlan: FaultPlan;
   private readonly recorded: Interaction[] = [];
   /** Streams still being recorded; each is drained and finalized on close. */
   private readonly pending: (() => Promise<void>)[] = [];
@@ -100,6 +113,7 @@ export class Cassette {
       throw new TomikoError(`\`fuzzy\` must be a number in (0, 1] or false, got ${this.fuzzy}`);
     }
     this.baseFetch = options.fetch ?? globalThis.fetch;
+    this.faultPlan = new FaultPlan(options.faults ?? []);
     this.fetch = (input, init) => this.handle(input, init);
   }
 
@@ -121,7 +135,7 @@ export class Cassette {
    * is still being recorded contributes everything the caller has read from it.
    */
   get calls(): RecordedCall[] {
-    return this.served.map(({ interaction, replayed }) => {
+    return this.served.map(({ interaction, replayed, fault }) => {
       const { request, response } = interaction;
       const { model: responseModel, usage } = extractUsage(response.body);
       const requestModel = modelOf(request.body);
@@ -133,6 +147,7 @@ export class Cassette {
         requestBody: request.body,
         status: response.status,
         replayed,
+        fault,
         provider: detectProvider(request.url),
         model,
         usage,
@@ -151,7 +166,6 @@ export class Cassette {
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
     const request = new Request(input, init);
     if (this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
-    if (this.missing) throw new CassetteNotFoundError(this.file);
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {
@@ -160,13 +174,32 @@ export class Cassette {
       body: parseRequestBody(bodyText),
     };
 
+    const faults = this.faultPlan.next(recordedRequest);
+    const latency = faults.reduce((ms, f) => ms + (f.name === "latency" ? f.ms : 0), 0);
+    if (latency > 0) await delay(latency, request.signal);
+    const failure = faults.find((f) => f.name !== "latency" && f.name !== "cut_stream");
+    if (failure) return this.fail(failure, request, recordedRequest);
+
+    if (this.missing) throw new CassetteNotFoundError(this.file);
+    const { response, entry } = await this.serve(request, recordedRequest);
+    const cut = faults.find((f) => f.name === "cut_stream");
+    if (cut?.name === "cut_stream") {
+      entry.fault = "cut_stream";
+      return cutResponse(response, cut.afterEvents);
+    }
+    if (latency > 0) entry.fault = "latency";
+    return response;
+  }
+
+  private async serve(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
     if (this.mode !== "record") {
       const found = this.lookup(recordedRequest);
       if (found.match) {
         if (found.warning) this.warnings.push(found.warning);
         this.replayed.push(found.match);
-        this.served.push({ interaction: found.match, replayed: true });
-        return buildResponse(found.match.response, request.url);
+        const entry: ServedEntry = { interaction: found.match, replayed: true };
+        this.served.push(entry);
+        return { response: buildResponse(found.match.response, request.url), entry };
       }
       if (this.mode === "replay") {
         throw new RequestMismatchError(
@@ -179,6 +212,32 @@ export class Cassette {
       }
     }
     return this.record(request, recordedRequest);
+  }
+
+  /** Answers with a simulated failure. Nothing reaches the network and nothing is recorded. */
+  private fail(f: Fault, request: Request, recordedRequest: RecordedRequest): Response {
+    const interaction: Interaction = {
+      request: recordedRequest,
+      response: { status: 0, headers: {}, body: { type: "empty" } },
+      meta: { recordedAt: new Date().toISOString(), durationMs: 0 },
+    };
+    this.served.push({ interaction, replayed: false, fault: f.name });
+    if (f.name === "network_error") throw networkError(f.message);
+    if (f.name !== "rate_limit" && f.name !== "overloaded" && f.name !== "server_error") {
+      throw new TomikoError(`Fault "${f.name}" cannot fail a request.`);
+    }
+    const { status, body } = errorResponse(f.name, detectProvider(request.url));
+    interaction.response = {
+      status,
+      headers: {
+        "content-type": "application/json",
+        // SDKs wait this long before retrying; retry-after-ms is the precise one.
+        "retry-after-ms": String(f.retryAfterMs),
+        "retry-after": String(f.retryAfterMs / 1000),
+      },
+      body: { type: "json", value: body },
+    };
+    return buildResponse(interaction.response, request.url);
   }
 
   private matchable(body: unknown): unknown {
@@ -231,7 +290,7 @@ export class Cassette {
     return { nearest, score };
   }
 
-  private async record(request: Request, recordedRequest: RecordedRequest): Promise<Response> {
+  private async record(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
     const started = Date.now();
     const res = await this.baseFetch(request);
     const contentType = res.headers.get("content-type") ?? "";
@@ -247,7 +306,8 @@ export class Cassette {
     };
     this.interactions.push(interaction);
     this.recorded.push(interaction);
-    this.served.push({ interaction, replayed: false });
+    const entry: ServedEntry = { interaction, replayed: false };
+    this.served.push(entry);
     this.used.add(interaction);
     const init = { status: res.status, statusText: res.statusText, headers: liveHeaders(res.headers) };
 
@@ -261,14 +321,14 @@ export class Cassette {
           (error: unknown) => this.discard(interaction, error),
         ),
       );
-      return withUrl(new Response(stream, init), request.url);
+      return { response: withUrl(new Response(stream, init), request.url), entry };
     }
 
     const bytes = new Uint8Array(await res.arrayBuffer());
     interaction.response.body = encodeBody(bytes, contentType);
     this.finish(interaction, started);
     const body = bytes.byteLength === 0 || [101, 204, 205, 304].includes(res.status) ? null : bytes;
-    return withUrl(new Response(body, init), request.url);
+    return { response: withUrl(new Response(body, init), request.url), entry };
   }
 
   private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {

@@ -166,6 +166,60 @@ declare module "vitest" {
 }
 ```
 
+### Test what happens when the API fails
+
+Live APIs rarely fail on cue, so retry and fallback paths usually go untested. Replay a recording
+with simulated failures instead:
+
+```ts
+import { fault } from "tomiko";
+import { useCassette } from "tomiko/vitest";
+
+test("retries through a rate limit", async () => {
+  await useCassette(
+    async (c) => {
+      const answer = await agent.run("Book a table for two at 7pm");
+      expect(answer).toContain("Booked");
+      expect(c).toHaveMadeRequests(4); // 2 rate-limited attempts + 2 real turns
+    },
+    { faults: [fault.rateLimit({ times: 2 })] },
+  );
+});
+
+test("gives up cleanly when the API stays overloaded", async () => {
+  await useCassette(
+    async () => {
+      await expect(agent.run("Book a table")).rejects.toThrow(/try again later/);
+    },
+    { faults: [fault.overloaded({ times: Infinity })] },
+  );
+});
+```
+
+| Fault                         | Simulates                                                                         |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| `fault.rateLimit()`           | HTTP 429                                                                          |
+| `fault.overloaded()`          | Anthropic's 529 (503 for other providers)                                         |
+| `fault.serverError()`         | HTTP 500                                                                          |
+| `fault.networkError()`        | A reset connection: `fetch` rejects with `TypeError: fetch failed`                |
+| `fault.cutStream({ afterEvents })` | The connection drops mid-response: after N stream events (default 3), or halfway through a plain body |
+| `fault.latency({ ms })`       | A slow response; honors abort signals, so client timeouts fire                    |
+
+Error bodies use the provider's real format, so SDKs raise their usual typed errors
+(`Anthropic.RateLimitError`, `APIConnectionError`, ...). Error responses carry
+`retry-after-ms: 1`, so SDK retries happen instantly instead of waiting out the real backoff; set
+`retryAfterMs` to test your own waiting logic.
+
+Each fault hits the first request by default. Choose others with:
+
+- `on: 2` or `on: [1, 3]`: request numbers in the run, counting every request including retries
+- `times: 3`: the first three matching requests (`Infinity` for all of them)
+- `when: (request) => boolean`: only matching requests, e.g. `(r) => r.body.stream === true`
+
+Faulted requests never reach the network and are never recorded. `cutStream` during recording
+still saves the complete response, so the next run replays it whole. In assertions, `c.calls`
+shows each request's `status` and `fault`.
+
 ### Clients created at module load
 
 SDK clients capture `fetch` when they are constructed. If you build a client once, outside the
@@ -295,6 +349,7 @@ Models without a price are listed in the report instead of being silently counte
 | `redact`    | none                 | `(interaction) => interaction`, applied before each save.                   |
 | `pricing`   | Anthropic list price | Merged over the built-in pricing table.                                     |
 | `fetch`     | `globalThis.fetch`   | The fetch used to reach the network while recording.                        |
+| `faults`    | `[]`                 | Simulated failures; see [failures](#test-what-happens-when-the-api-fails).  |
 
 Pass options per cassette, or set defaults once with `configure()` in a setup file.
 
@@ -340,7 +395,6 @@ code that changed it.
 
 ## Roadmap
 
-- Fault injection: replay with rate limits, overloads and broken streams to test retry logic
 - First-class Jest support: test-name based cassettes and matcher types
 - Simulated streaming latency for UI tests
 - `tomiko prune` to drop recordings no test used

@@ -1,3 +1,5 @@
+import type { Fault, FaultName } from "./faults.js";
+
 /**
  * - `auto`    replay when a recording matches, otherwise hit the network and record (default locally)
  * - `replay`  never touch the network; unmatched requests throw (default when `CI` is set)
@@ -88,6 +90,8 @@ export interface TomikoOptions {
   pricing?: PricingTable;
   /** The fetch used to reach the network while recording. Default: `globalThis.fetch` at open time. */
   fetch?: typeof globalThis.fetch;
+  /** Simulated failures for testing retries and error handling. Build them with `fault.*`. */
+  faults?: Fault[];
 }
 
 export interface CassetteReport {
@@ -120,8 +124,11 @@ export interface RecordedCall {
   method: string;
   url: string;
   requestBody: unknown;
+  /** 0 when the request failed without a response (a simulated network error). */
   status: number;
   replayed: boolean;
+  /** The simulated fault that hit this request, if any. */
+  fault?: FaultName;
   provider?: string;
   model?: string;
   usage?: Usage;
