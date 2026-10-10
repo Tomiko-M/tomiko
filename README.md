@@ -27,8 +27,8 @@ traffic:
 - **Cost report.** Token usage and estimated spend per cassette, including how much replay saved.
 - **Safe to commit.** Request headers are never written to disk, response headers go through an
   allowlist, and secret-looking query parameters are redacted.
-- **Built on `fetch`, no dependencies.** Tested with `@anthropic-ai/sdk` and plain `fetch`; any
-  client that uses the standard `fetch` (or accepts a custom one) can be recorded.
+- **Works with the SDKs you use.** Tested against `@anthropic-ai/sdk`, `openai`, the Vercel AI
+  SDK and LangChain.js: tool loops, streaming, retries. Built on `fetch`, with no dependencies.
 
 ## Install
 
@@ -220,11 +220,23 @@ Faulted requests never reach the network and are never recorded. `cutStream` dur
 still saves the complete response, so the next run replays it whole. In assertions, `c.calls`
 shows each request's `status` and `fault`.
 
-### Clients created at module load
+### Supported clients
 
-SDK clients capture `fetch` when they are constructed. If you build a client once, outside the
-test, give it tomiko's `fetch`. It routes to whichever cassette is active and to the real network
-otherwise, so it is safe to leave in place.
+Every scenario below is covered by tests that record against a fake API, replay offline, and
+check that both runs give the same result:
+
+| Client                                  | Tested                                                                | Setup                    |
+| --------------------------------------- | --------------------------------------------------------------------- | ------------------------ |
+| `@anthropic-ai/sdk`                     | messages, streaming, tool use, typed errors and retries               | see below                |
+| `openai`                                | Chat Completions and Responses, streaming, tool calls, retries        | see below                |
+| Vercel AI SDK (`ai`, `@ai-sdk/*`)       | `generateText` multi-step tool loops, `streamText`, Anthropic and OpenAI providers | none                     |
+| LangChain.js (`@langchain/anthropic`, `@langchain/openai`) | `invoke`, bound tools                      | none (see below)         |
+| Anything else built on `fetch`          |                                                                       | none if it reads `globalThis.fetch` per request |
+
+**SDK clients created at module load.** The Anthropic and OpenAI SDKs capture `fetch` when a
+client is constructed. A client created inside the test picks up tomiko automatically. For one
+created once, outside any test, pass tomiko's `fetch`: it routes to whichever cassette is active
+and to the real network otherwise, so it is safe to leave in production code paths.
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
@@ -234,6 +246,11 @@ import { fetch } from "tomiko";
 export const anthropic = new Anthropic({ fetch });
 export const openai = new OpenAI({ fetch });
 ```
+
+The Vercel AI SDK looks up `globalThis.fetch` on every request, so providers need nothing.
+LangChain creates its SDK client on the first call and keeps it; that works as long as the first
+call happens inside a cassette. If the model may be used before any test runs, pass the fetch
+explicitly: `new ChatAnthropic({ clientOptions: { fetch } })`, `new ChatOpenAI({ configuration: { fetch } })`.
 
 ### Without touching globals
 

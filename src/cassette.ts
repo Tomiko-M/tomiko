@@ -13,6 +13,7 @@ import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js"
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
+import { realFetch } from "./runtime.js";
 import { cassettePath, loadCassette, saveCassette } from "./store.js";
 import type {
   CassetteReport,
@@ -112,7 +113,7 @@ export class Cassette {
     if (this.fuzzy !== false && !(this.fuzzy > 0 && this.fuzzy <= 1)) {
       throw new TomikoError(`\`fuzzy\` must be a number in (0, 1] or false, got ${this.fuzzy}`);
     }
-    this.baseFetch = options.fetch ?? globalThis.fetch;
+    this.baseFetch = options.fetch ?? realFetch();
     this.faultPlan = new FaultPlan(options.faults ?? []);
     this.fetch = (input, init) => this.handle(input, init);
   }

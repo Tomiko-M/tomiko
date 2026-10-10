@@ -1,5 +1,5 @@
 import { Cassette } from "./cassette.js";
-import { activate, assertNoActiveCassette, mergeOptions, runtime } from "./runtime.js";
+import { activate, assertNoActiveCassette, dispatch, mergeOptions, runtime } from "./runtime.js";
 import type { TomikoOptions } from "./types.js";
 
 export { Cassette, resolveMode } from "./cassette.js";
@@ -59,14 +59,8 @@ export async function cassette<T>(
   return outcome.value;
 }
 
-const nativeFetch = globalThis.fetch;
-
 /**
  * A stable fetch that routes to whichever cassette is active and to the real network otherwise.
  * Hand it to clients created once at module load: `new Anthropic({ fetch })`.
  */
-export const fetch: typeof globalThis.fetch = (input, init) => {
-  if (runtime.active) return runtime.active.fetch(input, init);
-  const current = globalThis.fetch === fetch ? nativeFetch : globalThis.fetch;
-  return current(input, init);
-};
+export const fetch: typeof globalThis.fetch = dispatch;

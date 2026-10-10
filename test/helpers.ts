@@ -90,3 +90,136 @@ export function anthropicStream(parts: string[], model = "claude-opus-5-5") {
     { event: "message_stop", data: { type: "message_stop" } },
   ];
 }
+
+export const OPENAI_URL = "https://api.openai.com/v1";
+
+interface FakeTool {
+  name: string;
+  input: unknown;
+}
+
+export function openaiChat(options: { text?: string; tools?: FakeTool[]; model?: string }) {
+  const tools = options.tools ?? [];
+  return {
+    id: "chatcmpl-1",
+    object: "chat.completion",
+    created: 1760000000,
+    model: options.model ?? "gpt-test",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: options.text ?? null,
+          refusal: null,
+          ...(tools.length > 0 && {
+            tool_calls: tools.map((t, i) => ({
+              id: `call_${i}`,
+              type: "function",
+              function: { name: t.name, arguments: JSON.stringify(t.input) },
+            })),
+          }),
+        },
+        logprobs: null,
+        finish_reason: tools.length > 0 ? "tool_calls" : "stop",
+      },
+    ],
+    usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, prompt_tokens_details: { cached_tokens: 40 } },
+  };
+}
+
+/** Chat Completions stream events; tool arguments arrive in fragments, usage in a final chunk. */
+export function openaiChatStream(options: { parts?: string[]; tool?: FakeTool; model?: string }) {
+  const base = { id: "chatcmpl-2", object: "chat.completion.chunk", created: 1760000000, model: options.model ?? "gpt-test" };
+  const chunk = (delta: object, finish: string | null = null) => ({
+    data: { ...base, choices: [{ index: 0, delta, logprobs: null, finish_reason: finish }] },
+  });
+  const events: { data: unknown }[] = [chunk({ role: "assistant", content: "" })];
+  for (const part of options.parts ?? []) events.push(chunk({ content: part }));
+  if (options.tool) {
+    const args = JSON.stringify(options.tool.input);
+    events.push(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: options.tool.name, arguments: "" } }] }));
+    for (const piece of [args.slice(0, 4), args.slice(4)]) {
+      events.push(chunk({ tool_calls: [{ index: 0, function: { arguments: piece } }] }));
+    }
+  }
+  events.push(chunk({}, options.tool ? "tool_calls" : "stop"));
+  events.push({ data: { ...base, choices: [], usage: { prompt_tokens: 80, completion_tokens: 12, total_tokens: 92 } } });
+  events.push({ data: "[DONE]" });
+  return events;
+}
+
+export function openaiResponse(options: { text?: string; tool?: FakeTool; model?: string; status?: string }) {
+  const output: unknown[] = [];
+  if (options.tool) {
+    output.push({
+      type: "function_call",
+      id: "fc_1",
+      call_id: "call_1",
+      name: options.tool.name,
+      arguments: JSON.stringify(options.tool.input),
+      status: "completed",
+    });
+  }
+  if (options.text !== undefined) {
+    output.push({
+      type: "message",
+      id: "msg_1",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text: options.text, annotations: [], logprobs: [] }],
+    });
+  }
+  return {
+    id: "resp_1",
+    object: "response",
+    created_at: 1760000000,
+    status: options.status ?? "completed",
+    model: options.model ?? "gpt-test",
+    output,
+    error: null,
+    incomplete_details: null,
+    usage: {
+      input_tokens: 100,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 20,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 120,
+    },
+  };
+}
+
+/** Responses API stream events for a text answer, ending with the full response. */
+export function openaiResponseStream(parts: string[], model = "gpt-test") {
+  const text = parts.join("");
+  const done = openaiResponse({ text, model });
+  const message = (done.output as object[])[0];
+  let seq = 0;
+  const event = (type: string, fields: object) => ({ data: { type, sequence_number: seq++, ...fields } });
+  return [
+    event("response.created", { response: { ...done, status: "in_progress", output: [], usage: null } }),
+    event("response.in_progress", { response: { ...done, status: "in_progress", output: [], usage: null } }),
+    event("response.output_item.added", {
+      output_index: 0,
+      item: { type: "message", id: "msg_1", status: "in_progress", role: "assistant", content: [] },
+    }),
+    event("response.content_part.added", {
+      item_id: "msg_1",
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    }),
+    ...parts.map((delta) =>
+      event("response.output_text.delta", { item_id: "msg_1", output_index: 0, content_index: 0, delta, logprobs: [] }),
+    ),
+    event("response.output_text.done", { item_id: "msg_1", output_index: 0, content_index: 0, text, logprobs: [] }),
+    event("response.content_part.done", {
+      item_id: "msg_1",
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text, annotations: [] },
+    }),
+    event("response.output_item.done", { output_index: 0, item: message }),
+    event("response.completed", { response: done }),
+  ];
+}
