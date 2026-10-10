@@ -44,4 +44,5 @@ Versions with a suffix, such as `0.3.0-beta.1`, are published under the `next` d
 `npm install tomiko` keeps getting the latest stable version.
 
 While the repository is public, npm attaches a provenance statement to every version published by
-the workflow, shown on the package page as "Built and signed on GitHub Actions".
+the workflow, shown on the package page as "Built and signed on GitHub Actions". The README images
+on the npm page are also loaded from the repository, so they only show up there once it is public.

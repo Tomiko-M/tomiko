@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/saykachi/tomiko/main/docs/hero-dark.svg">
-  <img alt="tomiko: record and replay LLM calls in your tests" src="https://raw.githubusercontent.com/saykachi/tomiko/main/docs/hero-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.svg">
+  <img alt="tomiko: record and replay LLM calls in your tests" src="docs/hero-light.svg" width="100%">
 </picture>
 
 <br>
@@ -11,7 +11,7 @@
 [![CI](https://github.com/saykachi/tomiko/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/saykachi/tomiko/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-2f7a4b)
 ![dependencies](https://img.shields.io/badge/dependencies-0-2f7a4b)
-[![license](https://img.shields.io/badge/license-MIT-6b6862)](https://github.com/saykachi/tomiko/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-6b6862)](LICENSE)
 
 **The first run records real LLM responses. Every run after replays them.**<br>
 Agent tests that run offline in milliseconds, cost nothing, and give the same answer every time.
@@ -48,8 +48,8 @@ on the test replays it, with no network, no key, and no tokens. On CI it never t
 network at all.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/saykachi/tomiko/main/docs/how-it-works-dark.svg">
-  <img alt="First run: tomiko asks the LLM API and records the answers to a cassette. Every run after: tomiko replays the cassette and the API is not called." src="https://raw.githubusercontent.com/saykachi/tomiko/main/docs/how-it-works-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.svg">
+  <img alt="First run: tomiko asks the LLM API and records the answers to a cassette. Every run after: tomiko replays the cassette and the API is not called." src="docs/how-it-works-light.svg" width="100%">
 </picture>
 
 ## Why tomiko
@@ -160,8 +160,8 @@ Every cassette as a conversation: system prompt, tool calls and results, the res
 tokens, cost and time of each step. One HTML file, no server, ready to attach to a CI run.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/saykachi/tomiko/main/docs/viewer-dark.png">
-  <img alt="tomiko view showing an agent run as a conversation, with tool calls, results and per-step cost" src="https://raw.githubusercontent.com/saykachi/tomiko/main/docs/viewer-light.png" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/viewer-dark.png">
+  <img alt="tomiko view showing an agent run as a conversation, with tool calls, results and per-step cost" src="docs/viewer-light.png" width="100%">
 </picture>
 
 ## Works with
