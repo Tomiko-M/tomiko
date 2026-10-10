@@ -31,7 +31,7 @@
   "bugs": "https://github.com/saykachi/tomiko/issues",
   "type": "module",
   "bin": {
-    "tomiko": "./dist/cli.js"
+    "tomiko": "bin/tomiko.js"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -54,7 +54,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "sideEffects": [
     "./dist/vitest.js"

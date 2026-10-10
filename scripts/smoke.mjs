@@ -38,7 +38,7 @@ assert.equal(s.replayed, 1);
 assert.deepEqual(s.usage, { inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 });
 // The CLI builds a viewer page from the cassette just recorded.
 const page = join(dir, "view.html");
-const output = execFileSync(process.execPath, [new URL("../dist/cli.js", import.meta.url).pathname, "view", dir, "--no-open", "--out", page], {
+const output = execFileSync(process.execPath, [new URL("../bin/tomiko.js", import.meta.url).pathname, "view", dir, "--no-open", "--out", page], {
   encoding: "utf8",
 });
 assert.match(output, /1 cassette, 1 request → /);
