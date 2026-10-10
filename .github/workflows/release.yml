@@ -1,7 +1,14 @@
 name: Release
 
 # Publishes to npm when a GitHub release is published. npm trusts this workflow directly
-# (trusted publishing), so no npm token is stored; see RELEASING.md for the one-time setup.
+# (trusted publishing), so no npm token is stored.
+#
+# One-time setup, after the first `npm publish` by hand: on npmjs.com open the package →
+# Settings → Trusted Publisher → GitHub Actions: owner saykachi, repository tomiko, workflow
+# release.yml.
+#
+# To release: `npm version patch|minor|major`, then `git push --follow-tags`, then on GitHub
+# Releases → Draft a new release → pick the tag → Generate release notes → Publish release.
 on:
   release:
     types: [published]
