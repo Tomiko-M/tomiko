@@ -1,142 +1,121 @@
-# tomiko
+<div align="center">
 
-**Record & replay LLM API calls in your tests.** The first run hits the real API and saves every
-response to a cassette file. Every run after that replays it: zero tokens, millisecond tests,
-the same answer every time, and no API keys in CI.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.svg">
+  <img alt="tomiko: record and replay LLM calls in your tests" src="docs/hero-light.svg" width="100%">
+</picture>
 
-```ts
-import { cassette } from "tomiko";
+<br>
 
-test("agent books a table", async () => {
-  await cassette("agent/booking", async () => {
-    const result = await agent.run("Book a table for two at 7pm");
-    expect(result.toolCalls).toContainEqual(expect.objectContaining({ name: "book_table" }));
-  });
-});
-```
+[![npm](https://img.shields.io/npm/v/tomiko?color=c2491f&label=npm)](https://www.npmjs.com/package/tomiko)
+[![CI](https://github.com/saykachi/tomiko/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/saykachi/tomiko/actions/workflows/ci.yml)
+![node](https://img.shields.io/badge/node-%E2%89%A520-2f7a4b)
+![dependencies](https://img.shields.io/badge/dependencies-0-2f7a4b)
+[![license](https://img.shields.io/badge/license-MIT-6b6862)](LICENSE)
 
-Generic HTTP recorders (vcr, Polly, nock) capture bytes. tomiko knows it is looking at LLM
-traffic:
+**The first run records real LLM responses. Every run after replays them.**<br>
+Agent tests that run offline in milliseconds, cost nothing, and give the same answer every time.
 
-- **Streaming replays exactly.** SSE responses are stored chunk by chunk and streamed back the same
-  way, so SDK stream parsers, `finalMessage()`, and tool-call deltas behave as they did live.
-- **Diffs you can read.** When a prompt changes, the failure shows which words changed, not two
-  blobs of JSON.
-- **Fuzzy matching, if you want it.** Opt in to replaying a near-identical recording after a small
-  prompt tweak, with a warning instead of a failure.
-- **Cost report.** Token usage and estimated spend per cassette, including how much replay saved.
-- **Safe to commit.** Request headers are never written to disk, response headers go through an
-  allowlist, and secret-looking query parameters are redacted.
-- **Works with the SDKs you use.** Tested against `@anthropic-ai/sdk`, `openai`, the Vercel AI
-  SDK and LangChain.js: tool loops, streaming, retries. Built on `fetch`, with no dependencies.
+[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Reference](#reference)
 
-## Install
+</div>
+
+<br>
+
+## Quick start
 
 ```sh
 npm install --save-dev tomiko
 ```
-
-Requires Node.js 20 or newer. Works with any test runner.
-
-## Usage
-
-### Wrap a test in a cassette
-
-`cassette(name, fn)` routes `globalThis.fetch` through the cassette while `fn` runs, then saves
-any new recordings to `__cassettes__/<name>.json`. Commit that directory.
-
-```ts
-import Anthropic from "@anthropic-ai/sdk";
-import { cassette } from "tomiko";
-
-test("summarizes a ticket", async () => {
-  const summary = await cassette("summarize-ticket", async () => {
-    const client = new Anthropic();
-    const message = await client.messages.create({
-      model: "claude-opus-5-5",
-      max_tokens: 1024,
-      messages: [{ role: "user", content: "Summarize: printer on fire, again." }],
-    });
-    return message.content[0].type === "text" ? message.content[0].text : "";
-  });
-  expect(summary).toMatch(/printer/i);
-});
-```
-
-### Vitest: name cassettes after the test
-
-`tomiko/vitest` names each cassette after the running test, so there is nothing to invent, nothing
-to copy-paste wrong, and renaming a test renames its cassette. Cassettes are stored next to the test
-file, like snapshots, with one directory level per `describe` block:
-
-```ts
-import { useCassette } from "tomiko/vitest";
-
-describe("agent", () => {
-  test("books a table", async () => {
-    // → __cassettes__/booking.test.ts/agent/books-a-table.json
-    await useCassette(async () => {
-      const result = await agent.run("Book a table for two at 7pm");
-      expect(result.toolCalls).toContainEqual(expect.objectContaining({ name: "book_table" }));
-    });
-  });
-});
-```
-
-Need two cassettes in one test? Give each a suffix: `useCassette("second turn", fn)`.
-
-Or skip the wrapper and give every test a cassette with one line in a setup file:
-
-```ts
-// vitest.setup.ts  (add it to `test.setupFiles` in vitest.config.ts)
-import { setupCassettes } from "tomiko/vitest";
-
-setupCassettes();
-```
-
-Tests that make no requests leave no file behind, and in `replay` mode they pass without one: a
-missing cassette only fails a test when it actually sends a request. `setupCassettes()` can also be
-called inside a `describe` block to cover only that block. Both helpers patch the global `fetch`,
-so they don't work with `test.concurrent`.
-
-`tomiko/vitest` is ESM only, as Vitest is, and needs Vitest 1 or newer.
-
-### Assert what the agent did
-
-The final answer is only part of an agent's behavior. tomiko sees every request and response, so
-you can assert on the steps: which tools the model called and with what arguments, how many
-requests it took, which model ran, and what it cost. Importing `tomiko/vitest` registers the
-matchers:
 
 ```ts
 import { useCassette } from "tomiko/vitest";
 
 test("books a table", async () => {
   await useCassette(async (c) => {
-    await agent.run("Book a table for two at 7pm");
+    const answer = await agent.run("Table for two at 7pm, by the window");
 
+    expect(answer).toContain("Booked");
     expect(c).toHaveCalledTool("book_table", { guests: 2 });
-    expect(c).not.toHaveCalledTool("cancel_booking");
-    expect(c).toHaveCalledToolsInOrder(["search_tables", "book_table"]);
-    expect(c).toHaveMadeRequests({ max: 5 }); // no runaway loops
-    expect(c).toCostLessThan(0.05);           // USD, estimated
+    expect(c).toCostLessThan(0.05);
   });
 });
 ```
 
-| Matcher                              | Passes when                                                                     |
-| ------------------------------------ | ------------------------------------------------------------------------------- |
-| `toHaveCalledTool(name, input?)`     | The model called the tool; `input` must be contained in its arguments           |
-| `toHaveCalledToolTimes(name, n)`     | The tool was called exactly `n` times                                           |
-| `toHaveCalledToolsInOrder(names)`    | The tools were called in this relative order, other calls allowed in between    |
-| `toHaveMadeRequests(n \| {min,max})` | The number of requests is `n`, or within the range                              |
-| `toHaveUsedModel(model \| regex)`    | At least one request went to the model                                          |
-| `toCostLessThan(usd)`                | The estimated cost is below `usd`; fails loudly if a model has no known price   |
-| `toHaveUsedFewerTokensThan(n)`       | Input, output and cache tokens add up to fewer than `n`                         |
+Run it once with your API key: tomiko records every request to
+`__cassettes__/booking.test.ts/books-a-table.json` next to the test. Commit that file. From then
+on the test replays it, with no network, no key, and no tokens. On CI it never touches the
+network at all.
 
-`input` is compared recursively and may contain asymmetric matchers:
-`{ table: expect.any(Number), note: expect.stringMatching(/window/) }`. A failure lists the calls
-that were made:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.svg">
+  <img alt="First run: tomiko asks the LLM API and records the answers to a cassette. Every run after: tomiko replays the cassette and the API is not called." src="docs/how-it-works-light.svg" width="100%">
+</picture>
+
+## Why tomiko
+
+HTTP recorders like nock or Polly capture bytes. tomiko knows it is looking at LLM traffic.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Streams replay exactly**<br>
+SSE responses come back chunk by chunk, so `stream()`, `finalMessage()` and streamed tool calls
+behave as they did live.
+
+</td>
+<td width="50%" valign="top">
+
+**Assertions about behavior**<br>
+Which tools the model called, with what arguments, in what order, how many requests it took, and
+what it cost.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Failures on demand**<br>
+Replay with rate limits, overloads, dropped connections and slow responses to test your retry
+paths.
+
+</td>
+<td valign="top">
+
+**Diffs you can read**<br>
+Change a prompt and the failure shows the changed words, not two blobs of JSON.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Safe to commit**<br>
+API keys and request headers are never written to disk. Secret query parameters are redacted.
+
+</td>
+<td valign="top">
+
+**Works with your stack**<br>
+Anthropic, OpenAI, Vercel AI SDK, LangChain.js, plain `fetch`. Any test runner. No dependencies.
+
+</td>
+</tr>
+</table>
+
+## Assert what your agent did
+
+Importing `tomiko/vitest` adds matchers that read the requests and responses in the cassette:
+
+```ts
+expect(c).toHaveCalledTool("book_table", { guests: 2, table: expect.any(Number) });
+expect(c).toHaveCalledToolsInOrder(["search_tables", "book_table"]);
+expect(c).not.toHaveCalledTool("cancel_booking");
+expect(c).toHaveMadeRequests({ max: 5 }); // no runaway loops
+```
+
+When one fails, you see what the agent did instead:
 
 ```
 expected cassette "booking.test.ts/books a table" to call tool "cancel_booking".
@@ -145,98 +124,143 @@ Tool calls:
   book_table({"table":12,"guests":2,"note":"window"})
 ```
 
-Tool calls and text are read from Anthropic Messages, OpenAI Chat Completions and OpenAI Responses,
-streamed or not, with tool arguments reassembled from stream fragments. They work the same whether
-the cassette is recording or replaying.
+| Matcher | Passes when |
+| --- | --- |
+| `toHaveCalledTool(name, input?)` | the tool was called; `input` must be contained in its arguments |
+| `toHaveCalledToolTimes(name, n)` | the tool was called exactly `n` times |
+| `toHaveCalledToolsInOrder(names)` | the tools were called in this order, others allowed in between |
+| `toHaveMadeRequests(n \| {min, max})` | the number of requests is `n`, or in range |
+| `toHaveUsedModel(model \| regex)` | a request went to the model |
+| `toCostLessThan(usd)` | the estimated cost is below `usd` |
+| `toHaveUsedFewerTokensThan(n)` | all tokens add up to fewer than `n` |
 
-With `setupCassettes()`, get the test's cassette with `currentCassette()`. For your own checks,
-`c.calls` lists every request with its model, usage, cost, text and tool calls, and `c.toolCalls`
-lists every tool call in order.
+## Test the failure paths
 
-**Jest:** register the matchers yourself with `import { matchers } from "tomiko"` and
-`expect.extend(matchers)`; they use the standard `expect.extend` API.
-
-**Vitest before v5:** matcher types are declared for Vitest 5. On older versions, declare them in
-your project the way your Vitest version's custom matcher docs describe, for example:
-
-```ts
-import type { TomikoMatchers } from "tomiko";
-declare module "vitest" {
-  interface Assertion<T = any> extends TomikoMatchers<void> {}
-}
-```
-
-### Test what happens when the API fails
-
-Live APIs rarely fail on cue, so retry and fallback paths usually go untested. Replay a recording
-with simulated failures instead:
+Live APIs rarely fail on cue. Recordings can:
 
 ```ts
 import { fault } from "tomiko";
-import { useCassette } from "tomiko/vitest";
 
-test("retries through a rate limit", async () => {
-  await useCassette(
-    async (c) => {
-      const answer = await agent.run("Book a table for two at 7pm");
-      expect(answer).toContain("Booked");
-      expect(c).toHaveMadeRequests(4); // 2 rate-limited attempts + 2 real turns
-    },
-    { faults: [fault.rateLimit({ times: 2 })] },
-  );
-});
-
-test("gives up cleanly when the API stays overloaded", async () => {
-  await useCassette(
-    async () => {
-      await expect(agent.run("Book a table")).rejects.toThrow(/try again later/);
-    },
-    { faults: [fault.overloaded({ times: Infinity })] },
-  );
-});
+await useCassette(run, { faults: [fault.rateLimit({ times: 2 })] }); // 429, 429, then the recording
+await useCassette(run, { faults: [fault.cutStream({ afterEvents: 3 })] }); // connection drops mid-stream
 ```
 
-| Fault                         | Simulates                                                                         |
-| ----------------------------- | --------------------------------------------------------------------------------- |
-| `fault.rateLimit()`           | HTTP 429                                                                          |
-| `fault.overloaded()`          | Anthropic's 529 (503 for other providers)                                         |
-| `fault.serverError()`         | HTTP 500                                                                          |
-| `fault.networkError()`        | A reset connection: `fetch` rejects with `TypeError: fetch failed`                |
-| `fault.cutStream({ afterEvents })` | The connection drops mid-response: after N stream events (default 3), or halfway through a plain body |
-| `fault.latency({ ms })`       | A slow response; honors abort signals, so client timeouts fire                    |
+`rateLimit` · `overloaded` · `serverError` · `networkError` · `cutStream` · `latency`
 
-Error bodies use the provider's real format, so SDKs raise their usual typed errors
-(`Anthropic.RateLimitError`, `APIConnectionError`, ...). Error responses carry
-`retry-after-ms: 1`, so SDK retries happen instantly instead of waiting out the real backoff; set
-`retryAfterMs` to test your own waiting logic.
+Errors use each provider's real format, so SDKs throw their usual typed errors, and tell SDKs to
+retry right away instead of waiting out a real backoff. Target requests with `on: [1, 3]`, `times: n` or `when: (request) => …`.
 
-Each fault hits the first request by default. Choose others with:
+## See every run
 
-- `on: 2` or `on: [1, 3]`: request numbers in the run, counting every request including retries
-- `times: 3`: the first three matching requests (`Infinity` for all of them)
-- `when: (request) => boolean`: only matching requests, e.g. `(r) => r.body.stream === true`
+```sh
+npx tomiko view
+```
 
-Faulted requests never reach the network and are never recorded. `cutStream` during recording
-still saves the complete response, so the next run replays it whole. In assertions, `c.calls`
-shows each request's `status` and `fault`.
+Every cassette as a conversation: system prompt, tool calls and results, the response, and the
+tokens, cost and time of each step. One HTML file, no server, ready to attach to a CI run.
 
-### Supported clients
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/viewer-dark.png">
+  <img alt="tomiko view showing an agent run as a conversation, with tool calls, results and per-step cost" src="docs/viewer-light.png" width="100%">
+</picture>
 
-Every scenario below is covered by tests that record against a fake API, replay offline, and
-check that both runs give the same result:
+## Works with
 
-| Client                                  | Tested                                                                | Setup                    |
-| --------------------------------------- | --------------------------------------------------------------------- | ------------------------ |
-| `@anthropic-ai/sdk`                     | messages, streaming, tool use, typed errors and retries               | see below                |
-| `openai`                                | Chat Completions and Responses, streaming, tool calls, retries        | see below                |
-| Vercel AI SDK (`ai`, `@ai-sdk/*`)       | `generateText` multi-step tool loops, `streamText`, Anthropic and OpenAI providers | none                     |
-| LangChain.js (`@langchain/anthropic`, `@langchain/openai`) | `invoke`, bound tools                      | none (see below)         |
-| Anything else built on `fetch`          |                                                                       | none if it reads `globalThis.fetch` per request |
+| | Tested | Setup |
+| --- | --- | --- |
+| **Anthropic SDK** | messages, streaming, tools, errors and retries | none ¹ |
+| **OpenAI SDK** | Chat Completions, Responses, streaming, tools, retries | none ¹ |
+| **Vercel AI SDK** | `generateText` tool loops, `streamText` | none |
+| **LangChain.js** | `ChatAnthropic`, `ChatOpenAI`, bound tools | none ² |
+| **Anything on `fetch`** | | none |
 
-**SDK clients created at module load.** The Anthropic and OpenAI SDKs capture `fetch` when a
-client is constructed. A client created inside the test picks up tomiko automatically. For one
-created once, outside any test, pass tomiko's `fetch`: it routes to whichever cassette is active
-and to the real network otherwise, so it is safe to leave in production code paths.
+<sub>¹ For a client created once at module load, pass `fetch` from `tomiko`, see
+[below](#clients-created-before-a-test). ² If the model may be called before any test runs, pass
+`fetch` the same way.</sub>
+
+Each row is covered by tests that record against a fake API, replay offline, and require identical
+results.
+
+## Reference
+
+<details>
+<summary><b>Modes and CI</b></summary>
+
+<br>
+
+| Mode | Recording matches | No recording matches | Default when |
+| --- | --- | --- | --- |
+| `auto` | replayed | sent to the API and recorded | running locally |
+| `replay` | replayed | test fails, nothing is sent | `CI` is set |
+| `record` | ignored | everything is re-recorded | never |
+
+Set a mode with `{ mode }`, with `configure({ mode })`, or for one run with the environment, which
+wins over both:
+
+```sh
+TOMIKO_MODE=record npm test   # refresh every cassette
+```
+
+Identical requests are answered in the order they were recorded. A missing cassette only fails a
+test that actually sends a request.
+
+</details>
+
+<details>
+<summary><b>Without Vitest</b>: <code>cassette()</code>, <code>openCassette()</code>, Jest</summary>
+
+<br>
+
+`cassette(name, fn)` works with any test runner. It routes `globalThis.fetch` through the cassette
+while `fn` runs, then saves new recordings to `__cassettes__/<name>.json`.
+
+```ts
+import { cassette } from "tomiko";
+
+const answer = await cassette("support/refund", () => agent.run("I want a refund"));
+```
+
+`openCassette(name)` touches no globals: pass `c.fetch` to a client and call `await c.close()` to
+save.
+
+For Jest, register the matchers yourself: `expect.extend(matchers)` with
+`import { matchers } from "tomiko"`.
+
+</details>
+
+<details>
+<summary><b>Vitest helpers</b>: naming, <code>setupCassettes()</code>, types</summary>
+
+<br>
+
+`useCassette(fn)` names the cassette after the test, one directory per `describe` block, next to
+the test file. For several cassettes in one test, add a suffix: `useCassette("second turn", fn)`.
+
+To give every test a cassette with no wrapper, add to a setup file:
+
+```ts
+import { setupCassettes } from "tomiko/vitest";
+
+setupCassettes();
+```
+
+Then read the current one with `currentCassette()`. Tests that make no requests leave no file
+behind. Both helpers patch the global `fetch`, so they don't work with `test.concurrent`.
+
+Matcher types are declared for Vitest 5. On older versions, declare them in your project following
+your version's custom matcher docs, with the exported `TomikoMatchers` interface.
+
+</details>
+
+<details>
+<summary id="clients-created-before-a-test"><b>Clients created before a test</b></summary>
+
+<br>
+
+The Anthropic and OpenAI SDKs capture `fetch` when a client is constructed. A client created inside
+a test picks up tomiko automatically. For one created at module load, pass tomiko's `fetch`. It
+routes to the active cassette and to the real network otherwise, so it is safe to leave in
+production code.
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
@@ -245,102 +269,60 @@ import { fetch } from "tomiko";
 
 export const anthropic = new Anthropic({ fetch });
 export const openai = new OpenAI({ fetch });
+// LangChain: new ChatAnthropic({ clientOptions: { fetch } }), new ChatOpenAI({ configuration: { fetch } })
 ```
 
-The Vercel AI SDK looks up `globalThis.fetch` on every request, so providers need nothing.
-LangChain creates its SDK client on the first call and keeps it; that works as long as the first
-call happens inside a cassette. If the model may be used before any test runs, pass the fetch
-explicitly: `new ChatAnthropic({ clientOptions: { fetch } })`, `new ChatOpenAI({ configuration: { fetch } })`.
+</details>
 
-### Without touching globals
+<details>
+<summary><b>When a prompt changes</b>: diffs, fuzzy matching, ignored fields</summary>
 
-```ts
-import { openCassette } from "tomiko";
+<br>
 
-const c = await openCassette("booking");
-const client = new Anthropic({ fetch: c.fetch });
-// ...
-const report = await c.close(); // saves new recordings
-```
-
-## Modes
-
-| Mode     | Matching recording | No matching recording        | Default when            |
-| -------- | ------------------ | ---------------------------- | ----------------------- |
-| `auto`   | replayed           | sent to the API and recorded | running locally         |
-| `replay` | replayed           | `RequestMismatchError`       | the `CI` env var is set |
-| `record` | ignored            | everything is re-recorded    | never                   |
-
-Set the mode per cassette with `{ mode }`, globally with `configure({ mode })`, or for one run with
-the environment, which overrides both:
-
-```sh
-TOMIKO_MODE=record npm test   # refresh every cassette
-```
-
-A cassette missing in `replay` mode fails on the first request that needs it, with
-`CassetteNotFoundError`.
-
-Identical requests are served in the order they were recorded, so an agent that sends the same
-request twice gets both recorded answers back.
-
-## When a request changes
-
-In `replay` mode, a request with no recording fails with the closest recording and what changed:
+In `replay` mode, a request with no recording fails with the closest one and what changed:
 
 ```
 RequestMismatchError: No recorded interaction in cassette "agent/booking" matches POST https://api.anthropic.com/v1/messages.
 Closest recording (94% similar) differs in:
   ~ system: "…for a small restaurant. [-Always-]{+Never+} confirm the time and…"
   + temperature: 0.2
-
-If the change is intentional, re-record with TOMIKO_MODE=record, or allow near matches with the `fuzzy` option.
 ```
 
-### Fuzzy matching
+Re-record with `TOMIKO_MODE=record`, or allow near matches: with `{ fuzzy: 0.9 }`, a request at
+least 90% similar replays the recording and the diff becomes a warning. A recording from a
+different model is never used.
 
-```ts
-await cassette("agent/booking", run, { fuzzy: 0.9 });
-```
+Leave volatile fields out of matching with `ignore: ["metadata.user_id", "messages.*.cache_control"]`.
 
-With `fuzzy` set, a request at least that similar to an unused recording replays it, and the diff
-is reported as a warning. Similarity is weighted by length, so editing one word in a long system
-prompt scores high, while a changed tool, parameter, or message scores low. A recording made with a
-different `model` is never used as a fuzzy match.
+</details>
 
-### Ignoring volatile fields
+<details>
+<summary><b>Options</b></summary>
 
-```ts
-configure({ ignore: ["metadata.user_id", "messages.*.cache_control"] });
-```
+<br>
 
-Paths use dots, and `*` matches every key or array index. JSON key order never matters.
+| Option | Default | |
+| --- | --- | --- |
+| `dir` | `"__cassettes__"` | where cassettes live (`tomiko/vitest`: next to each test) |
+| `mode` | `auto`, or `replay` on CI | see modes |
+| `fuzzy` | `false` | similarity threshold for near matches |
+| `ignore` | `[]` | request body paths left out of matching |
+| `faults` | `[]` | simulated failures |
+| `intercept` | every request | `(request) => boolean`; others go straight to the network |
+| `redact` | none | `(interaction) => interaction`, applied before saving |
+| `pricing` | Anthropic list prices | USD per million tokens, merged over the built-in table |
+| `fetch` | `globalThis.fetch` | what recording uses to reach the network |
 
-## Browse your cassettes
+Pass them per cassette, or set defaults once with `configure()`.
 
-```sh
-npx tomiko view
-```
+</details>
 
-builds a single HTML page from every `__cassettes__` directory in the project and opens it: each
-request as a conversation, with the system prompt, tools, tool calls and results, the response,
-and the tokens, cost and time of every step. History an agent sends again on each step is folded
-away, so every step shows only what is new.
+<details>
+<summary><b>Cost and pricing</b></summary>
 
-![tomiko view: an agent run as a conversation, with tool calls, results and per-step cost](docs/viewer.png)
+<br>
 
-The page is self-contained, with no server and nothing loaded from the network, so it works as a
-CI artifact or attached to a bug report. Cassette content is rendered as text, never as HTML.
-
-```sh
-npx tomiko view recordings/          # a directory outside __cassettes__, searched in full
-npx tomiko view --out report.html --no-open
-```
-
-## Cost report
-
-Every cassette produces a report, and `summary()` / `formatSummary()` aggregate the ones closed in
-the current process:
+Every cassette reports tokens and estimated cost; `formatSummary()` prints a summary:
 
 ```
 tomiko · 7 cassettes · 5 replayed · 1 recorded
@@ -348,95 +330,38 @@ tokens · 11.0K in · 1.9K out · 72.0K cache read · 0 cache write
 cost  · $0.0960 est. · $0.0800 saved by replay
 ```
 
-To print it after each test file with Vitest:
+Usage is read from Anthropic and OpenAI responses, streamed or not. Anthropic prices are built in;
+add others with `pricing: { "my-model": { input: 2, output: 8 } }`. A model with no price is
+reported, never counted as free, and `toCostLessThan` fails on it.
 
-```ts
-// vitest.setup.ts
-import { afterAll } from "vitest";
-import { formatSummary, summary } from "tomiko";
+</details>
 
-afterAll(() => {
-  if (summary().cassettes > 0) console.log(formatSummary());
-});
-```
+<details>
+<summary><b>What a cassette stores</b></summary>
 
-Usage is read from Anthropic Messages responses and streams, and from OpenAI Chat Completions and
-Responses API responses and streams. Built-in prices cover Anthropic models. Add others, or
-override any price (USD per million tokens), with `pricing`:
+<br>
 
-```ts
-configure({
-  pricing: {
-    "my-model": { input: 2, output: 8, cacheRead: 0.5 },
-  },
-});
-```
-
-A key also matches model ids that start with it, so `"claude-opus-5"` covers dated snapshots.
-Models without a price are listed in the report instead of being silently counted as free.
-
-## Options
-
-| Option      | Default              | Description                                                                 |
-| ----------- | -------------------- | --------------------------------------------------------------------------- |
-| `dir`       | `"__cassettes__"`    | Where cassettes are stored. `tomiko/vitest` defaults to next to each test.  |
-| `mode`      | `auto` / `replay`    | See [Modes](#modes).                                                        |
-| `fuzzy`     | `false`              | Similarity threshold in (0, 1] for replaying near matches.                  |
-| `ignore`    | `[]`                 | Request body paths left out of matching.                                    |
-| `intercept` | all requests         | `(request) => boolean`. Others go straight to the network, unrecorded.      |
-| `redact`    | none                 | `(interaction) => interaction`, applied before each save.                   |
-| `pricing`   | Anthropic list price | Merged over the built-in pricing table.                                     |
-| `fetch`     | `globalThis.fetch`   | The fetch used to reach the network while recording.                        |
-| `faults`    | `[]`                 | Simulated failures; see [failures](#test-what-happens-when-the-api-fails).  |
-
-Pass options per cassette, or set defaults once with `configure()` in a setup file.
-
-## What a cassette looks like
+Plain JSON, so a changed prompt shows up in code review next to the code that changed it:
 
 ```json
 {
   "version": 1,
   "interactions": [
     {
-      "request": {
-        "method": "POST",
-        "url": "https://api.anthropic.com/v1/messages",
-        "body": { "model": "claude-opus-5-5", "max_tokens": 1024, "messages": [ ... ] }
-      },
-      "response": {
-        "status": 200,
-        "headers": { "content-type": "text/event-stream", "request-id": "req_..." },
-        "body": { "type": "sse", "chunks": ["event: message_start\ndata: {...}\n\n", "..."] }
-      },
-      "meta": {
-        "provider": "anthropic",
-        "model": "claude-opus-5-5",
-        "usage": { "inputTokens": 120, "outputTokens": 42, "cacheReadTokens": 2000, "cacheWriteTokens": 0 },
-        "recordedAt": "2026-10-10T12:00:00.000Z",
-        "durationMs": 1830
-      }
+      "request": { "method": "POST", "url": "https://api.anthropic.com/v1/messages", "body": { "model": "claude-opus-5-5", "messages": [] } },
+      "response": { "status": 200, "headers": { "content-type": "text/event-stream" }, "body": { "type": "sse", "chunks": ["event: message_start\n…"] } },
+      "meta": { "provider": "anthropic", "model": "claude-opus-5-5", "usage": { "inputTokens": 120, "outputTokens": 42 }, "durationMs": 1830 }
     }
   ]
 }
 ```
 
-Cassettes are plain JSON, so they diff well in code review: a changed prompt shows up next to the
-code that changed it.
+- **Never stored:** request headers, including `x-api-key` and `authorization`.
+- **Response headers:** only `content-type`, `retry-after`, `request-id`, `x-request-id`.
+- **Redacted:** query parameters such as `key`, `api_key`, `token`.
+- **Stored as is:** request and response bodies. Scrub personal data with `redact`.
 
-## What is stored, and what isn't
-
-- **Never stored:** request headers (`x-api-key`, `authorization`, and the rest).
-- **Response headers:** only `content-type`, `retry-after`, `request-id`, and `x-request-id`.
-- **Redacted:** query parameters named like `key`, `api_key`, `token`, `access_token`, `sig`.
-- **Stored as is:** request and response bodies. If prompts or answers contain personal data, scrub
-  them with `redact`.
-
-## Roadmap
-
-- First-class Jest support: test-name based cassettes and matcher types
-- Simulated streaming latency for UI tests
-- `tomiko prune` to drop recordings no test used
-- MCP (Model Context Protocol) traffic over stdio
+</details>
 
 ## License
 

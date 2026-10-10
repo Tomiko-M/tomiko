@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="420" viewBox="0 0 1100 420" role="img" aria-label="First run: tomiko sends requests to the LLM API and records them to a cassette. Every run after: tomiko replays the cassette and the API is not called.">
+  <defs><marker id="head-9198a1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#9198a1"/></marker><marker id="head-f0885b" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f0885b"/></marker><marker id="head-7cc79a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7cc79a"/></marker></defs>
+  <rect x="1" y="1" width="1098" height="418" rx="24" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+  
+    <text x="40" y="72" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#e6edf3">First run</text>
+    <text x="40" y="104" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#9198a1">Real API calls, saved to a file.</text>
+    <text x="40" y="150" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#9198a1" font-weight="600">seconds · real tokens</text>
+    <rect x="380" y="67" width="150" height="56" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="2"/>
+    <text x="455" y="101" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="600" fill="#e6edf3">your test</text>
+    <path d="M 530 95 L 586 95" fill="none" stroke="#9198a1" stroke-width="2.5" marker-end="url(#head-9198a1)"/>
+    <rect x="590" y="67" width="150" height="56" rx="14" fill="#f0885b" stroke="#f0885b" stroke-width="2"/>
+    <text x="665" y="101" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#1a1310">tomiko</text>
+    <rect x="860" y="30" width="200" height="56" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="2"/>
+    <text x="960" y="64" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="600" fill="#e6edf3">LLM API</text>
+    <rect x="860" y="104" width="200" height="56" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="2"/>
+    <text x="960" y="138" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="600" fill="#e6edf3">cassette.json</text>
+    <path d="M 740 87 C 800 87, 800 58, 856 58" fill="none" stroke="#9198a1" stroke-width="2.5" marker-end="url(#head-9198a1)"/><text x="800" y="48" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#9198a1">asks</text><path d="M 740 103 C 800 103, 800 132, 856 132" fill="none" stroke="#f0885b" stroke-width="2.5" marker-end="url(#head-f0885b)"/><text x="800" y="156" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#9198a1">records</text>
+    
+  <line x1="40" y1="210" x2="1060" y2="210" stroke="#30363d" stroke-width="2"/>
+  
+    <text x="40" y="277" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#e6edf3">Every run after</text>
+    <text x="40" y="309" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#9198a1">Answered from the file, offline.</text>
+    <text x="40" y="355" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#7cc79a" font-weight="600">milliseconds · $0 · same answer</text>
+    <rect x="380" y="272" width="150" height="56" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="2"/>
+    <text x="455" y="306" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="600" fill="#e6edf3">your test</text>
+    <path d="M 530 300 L 586 300" fill="none" stroke="#9198a1" stroke-width="2.5" marker-end="url(#head-9198a1)"/>
+    <rect x="590" y="272" width="150" height="56" rx="14" fill="#f0885b" stroke="#f0885b" stroke-width="2"/>
+    <text x="665" y="306" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#1a1310">tomiko</text>
+    <rect x="860" y="235" width="200" height="56" rx="14" fill="none" stroke="#545d68" stroke-width="2" stroke-dasharray="6 6"/>
+    <text x="960" y="269" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="600" fill="#545d68">LLM API</text>
+    <rect x="860" y="309" width="200" height="56" rx="14" fill="#0d1117" stroke="#3d444d" stroke-width="2"/>
+    <text x="960" y="343" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="600" fill="#e6edf3">cassette.json</text>
+    <path d="M 860 337 C 800 337, 800 300, 744 300" fill="none" stroke="#7cc79a" stroke-width="2.5" marker-end="url(#head-7cc79a)"/><text x="812" y="361" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#9198a1">replays</text><text x="960" y="227" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#545d68">not called</text>
+    
+</svg>
