@@ -21,8 +21,7 @@ your machine.
    **Trusted Publisher** → **GitHub Actions**, and enter owner `saykachi`, repository `tomiko`,
    workflow `release.yml`. No token is needed.
 4. Tag the release on GitHub so the changelog links work: **Releases** → **Draft a new release** →
-   tag `v0.1.0` → publish. The release workflow will refuse to publish 0.1.0 a second time, which
-   is expected for this one.
+   tag `v0.1.0` → publish. The release workflow sees 0.1.0 is already on npm and skips publishing.
 
 ## Every release after
 
