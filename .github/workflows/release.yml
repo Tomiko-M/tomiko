@@ -1,20 +1,36 @@
 name: Release
 
-# Pushing a version tag publishes it: to npm through trusted publishing (no npm token is stored),
-# then as a GitHub release whose notes are the tag's message.
+# Publishes the version in package.json to npm through trusted publishing (no npm token is
+# stored), then creates its GitHub release. Any of these starts it:
+#
+# - pushing a version tag: `npm version patch|minor|major`, then `git push --follow-tags`;
+#   the release notes are the tag's message
+# - publishing a release in GitHub's UI with a new `vX.Y.Z` tag
+# - running this workflow by hand on main (Actions → Release → Run workflow): it creates the tag
+#   and the release itself, with the notes you give or notes generated from merged pull requests
 #
 # One-time setup, after the first `npm publish` by hand: on npmjs.com open the package →
 # Settings → Trusted Publisher → GitHub Actions: owner Tomiko-M, repository tomiko, workflow
 # release.yml, with "Allow npm publish" checked.
-#
-# To release: `npm version patch|minor|major`, then `git push --follow-tags`. Creating the release
-# in GitHub's UI with a new tag works too; this workflow then leaves that release as it is.
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: Release notes in Markdown. Leave empty to generate them from merged pull requests.
+        required: false
+        default: ""
+
+# A release made in the UI also pushes its tag; runs queue up instead of publishing twice.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
-  contents: write # create the GitHub release
+  contents: write # create the tag and the GitHub release
   id-token: write # lets npm verify this workflow and sign provenance
 
 jobs:
@@ -30,13 +46,21 @@ jobs:
       - name: Update npm (trusted publishing needs 11.5.1 or newer)
         run: npm install -g npm@latest
       - run: npm ci
-      - name: Check the tag matches package.json
+      - name: Work out the tag
+        id: version
         run: |
-          expected="v$(node -p 'require("./package.json").version')"
-          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $expected"
+          tag="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            existing="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $tag already exists on another commit ($existing)"
+              exit 1
+            fi
+          elif [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $tag"
             exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       # Re-running a release, or tagging a version that was published by hand, is not an error.
       - name: Skip versions already on npm
         id: published
@@ -51,10 +75,11 @@ jobs:
       - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
         env:
+          TAG: ${{ steps.version.outputs.tag }}
           # npm only signs provenance for public repositories and refuses to publish otherwise.
           NPM_CONFIG_PROVENANCE: ${{ !github.event.repository.private }}
         run: |
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          if [[ "$TAG" == *-* ]]; then
             npm publish --access public --tag next
           else
             npm publish --access public
@@ -62,11 +87,19 @@ jobs:
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NOTES: ${{ inputs.notes }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            echo "::notice::Release $GITHUB_REF_NAME already exists"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists"
             exit 0
           fi
-          flags=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-from-tag "${flags[@]}"
+          flags=(--title "$TAG")
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            flags+=(--target "$GITHUB_SHA")
+            if [ -n "$NOTES" ]; then flags+=(--notes "$NOTES"); else flags+=(--generate-notes); fi
+          else
+            flags+=(--verify-tag --notes-from-tag)
+          fi
+          gh release create "$TAG" "${flags[@]}"
