@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { stripVTControlCharacters } from "node:util";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { main, type Io } from "../src/cli.js";
@@ -174,10 +175,11 @@ describe("html", () => {
 });
 
 describe("cli", () => {
-  function fakeIo(cwd: string) {
+  function fakeIo(cwd: string, options: { color?: boolean; animate?: boolean } = {}) {
     const out: string[] = [];
     const err: string[] = [];
     const opened: string[] = [];
+    const drawn: string[] = [];
     const io: Io = {
       cwd,
       log: (m) => out.push(m),
@@ -186,9 +188,19 @@ describe("cli", () => {
         opened.push(file);
         return true;
       },
+      stream: { isTTY: options.animate, write: (chunk: string) => drawn.push(chunk) },
+      color: options.color ?? false,
+      animate: options.animate ?? false,
     };
-    return { io, out, err, opened };
+    return { io, out, err, opened, drawn };
   }
+
+  const withCassette = () => {
+    const root = tmpDir();
+    mkdirSync(join(root, "__cassettes__"));
+    writeFileSync(join(root, "__cassettes__", "run.json"), JSON.stringify(agentRun()));
+    return root;
+  };
 
   it("writes the viewer and opens it", async () => {
     const root = tmpDir();
@@ -198,8 +210,25 @@ describe("cli", () => {
     expect(await main(["view", "--out", "report/view.html"], io)).toBe(0);
     const file = join(root, "report", "view.html");
     expect(readFileSync(file, "utf8")).toContain("<title>tomiko cassettes</title>");
-    expect(out[0]).toBe(`1 cassette, 2 requests → ${file}`);
+    expect(out).toEqual([
+      "  ✔ 1 cassette, 2 requests",
+      "    2.2K tokens · $0.0120 to record · claude-opus-5-5",
+      `    → ${join("report", "view.html")}`,
+      "    Opened in your browser.",
+    ]);
     expect(opened).toEqual([file]);
+  });
+
+  it("animates a cassette while it works and colors the result in a terminal", async () => {
+    const { io, out, drawn } = fakeIo(withCassette(), { color: true, animate: true });
+    expect(await main(["view", "--no-open", "--out", "v.html"], io)).toBe(0);
+    const frames = drawn.join("");
+    expect(frames).toContain("\x1b[?25l"); // cursor hidden while the reels turn
+    expect(frames).toMatch(/\[◴═◴\][^]*\[◷═◷\]/); // the reels turned at least once
+    expect(frames.endsWith("\x1b[?25h")).toBe(true); // and the cursor came back
+    expect(out[0]).toContain("\x1b[32m✔\x1b[39m");
+    expect(out[2]).toContain("\x1b]8;;file://"); // a clickable link to the page
+    expect(stripVTControlCharacters(out.join("\n"))).toContain("1 cassette, 2 requests");
   });
 
   it("can skip opening the browser", async () => {
@@ -223,6 +252,12 @@ describe("cli", () => {
     expect(out[0]).toContain("tomiko view [paths...]");
     expect(await main(["frobnicate"], io)).toBe(1);
     expect(await main(["view", "--bogus"], io)).toBe(1);
-    expect(err.map((e) => e.split("\n")[0])).toEqual(["Unknown command: frobnicate", "Unknown option: --bogus"]);
+    expect(err.map((e) => e.split("\n")[0])).toEqual(["  ✖ Unknown command: frobnicate", "  ✖ Unknown option: --bogus"]);
+  });
+
+  it("prints its version", async () => {
+    const { io, out } = fakeIo(tmpDir());
+    expect(await main(["--version"], io)).toBe(0);
+    expect(out).toEqual(["dev"]); // the build replaces it with package.json's version
   });
 });

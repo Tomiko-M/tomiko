@@ -1,5 +1,6 @@
 import { costOf, priceFor } from "./pricing.js";
 import { runtime } from "./runtime.js";
+import { colorEnabled, paint } from "./terminal.js";
 import type { CassetteReport, Interaction, Mode, PricingTable, Usage } from "./types.js";
 import { addUsage, emptyUsage } from "./usage.js";
 
@@ -99,17 +100,33 @@ export function summary(list: readonly CassetteReport[] = runtime.reports): Summ
 const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : `${n}`);
 const usd = (n: number) => `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}`;
 
-/** Human-readable summary, e.g. for a test runner's global teardown. */
-export function formatSummary(s: Summary = summary()): string {
+export interface FormatOptions {
+  /** ANSI colors. Off by default; `printSummary()` turns them on in a terminal. */
+  color?: boolean;
+}
+
+/** Human-readable summary, e.g. for a test runner's teardown. Without color it is plain text. */
+export function formatSummary(s: Summary = summary(), options: FormatOptions = {}): string {
+  const p = paint(options.color === true);
+  const n = (text: string) => p.bold(text);
+  const sep = p.dim(" · ");
   const lines = [
-    `tomiko · ${s.cassettes} cassette${s.cassettes === 1 ? "" : "s"} · ${s.replayed} replayed · ${s.recorded} recorded`,
-    `tokens · ${tokens(s.usage.inputTokens)} in · ${tokens(s.usage.outputTokens)} out · ` +
-      `${tokens(s.usage.cacheReadTokens)} cache read · ${tokens(s.usage.cacheWriteTokens)} cache write`,
+    `${p.accent(p.bold("tomiko"))}${sep}${n(String(s.cassettes))} cassette${s.cassettes === 1 ? "" : "s"}` +
+      `${sep}${n(String(s.replayed))} replayed${sep}${n(String(s.recorded))} recorded`,
+    `${p.dim("tokens")}${sep}${n(tokens(s.usage.inputTokens))} in${sep}${n(tokens(s.usage.outputTokens))} out${sep}` +
+      `${n(tokens(s.usage.cacheReadTokens))} cache read${sep}${n(tokens(s.usage.cacheWriteTokens))} cache write`,
   ];
   if (s.cost !== null) {
-    lines.push(`cost  · ${usd(s.cost)} est. · ${usd(s.savedCost ?? 0)} saved by replay`);
+    lines.push(`${p.dim("cost  ")}${sep}${n(usd(s.cost))} est.${sep}${p.green(`${usd(s.savedCost ?? 0)} saved by replay`)}`);
   }
-  if (s.unpricedModels.length > 0) lines.push(`no price for · ${s.unpricedModels.join(", ")}`);
-  if (s.warnings.length > 0) lines.push(`${s.warnings.length} warning(s):`, ...s.warnings.map((w) => `  ${w}`));
+  if (s.unpricedModels.length > 0) lines.push(`${p.dim("no price for")}${sep}${s.unpricedModels.join(", ")}`);
+  if (s.warnings.length > 0) {
+    lines.push(p.yellow(`${s.warnings.length} warning(s):`), ...s.warnings.map((w) => `  ${p.yellow("!")} ${w}`));
+  }
   return lines.join("\n");
+}
+
+/** Prints the summary, in color when the stream is a terminal (respecting NO_COLOR and FORCE_COLOR). */
+export function printSummary(s: Summary = summary(), stream: NodeJS.WriteStream = process.stdout): void {
+  stream.write(`${formatSummary(s, { color: colorEnabled(stream) })}\n`);
 }

@@ -129,10 +129,10 @@ describe("record and replay", () => {
     expect([status, replayed]).toEqual([204, 204]);
   });
 
-  it("replays error responses faithfully", async () => {
+  it("replays recorded error responses faithfully", async () => {
     const dir = tmpDir();
     const api = fakeApi(() => json({ type: "error", error: { type: "overloaded_error" } }, 529));
-    await cassette("errors", () => post(ask("hi")), { dir, fetch: api });
+    await cassette("errors", () => post(ask("hi")), { dir, fetch: api, recordErrors: true });
     const res = await cassette("errors", () => post(ask("hi")), { dir, mode: "replay", fetch: offline });
     expect(res.status).toBe(529);
     expect(await res.json()).toMatchObject({ error: { type: "overloaded_error" } });

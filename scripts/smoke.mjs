@@ -41,7 +41,8 @@ const page = join(dir, "view.html");
 const output = execFileSync(process.execPath, [new URL("../bin/tomiko.js", import.meta.url).pathname, "view", dir, "--no-open", "--out", page], {
   encoding: "utf8",
 });
-assert.match(output, /1 cassette, 1 request → /);
+assert.match(output, /✔ 1 cassette, 1 request\n/);
+assert.ok(!output.includes("\x1b"), "no colors when the output is not a terminal");
 assert.match(readFileSync(page, "utf8"), /claude-opus-5-5/);
 
 console.log(`smoke ok on node ${process.version}`);

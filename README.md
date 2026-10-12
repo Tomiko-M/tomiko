@@ -8,7 +8,7 @@
 <br>
 
 [![npm](https://img.shields.io/npm/v/tomiko?color=c2491f&label=npm)](https://www.npmjs.com/package/tomiko)
-[![CI](https://github.com/saykachi/tomiko/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/saykachi/tomiko/actions/workflows/ci.yml)
+[![CI](https://github.com/Tomiko-M/tomiko/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Tomiko-M/tomiko/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-2f7a4b)
 ![dependencies](https://img.shields.io/badge/dependencies-0-2f7a4b)
 [![license](https://img.shields.io/badge/license-MIT-6b6862)](LICENSE)
@@ -44,8 +44,9 @@ test("books a table", async () => {
 
 Run it once with your API key: tomiko records every request to
 `__cassettes__/booking.test.ts/books-a-table.json` next to the test. Commit that file. From then
-on the test replays it, with no network, no key, and no tokens. On CI it never touches the
-network at all.
+on the test replays it, with no network and no tokens. On CI it never touches the network at
+all. SDKs still want some API key to build a request, so give them any value:
+`ANTHROPIC_API_KEY=test`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.svg">
@@ -204,6 +205,10 @@ TOMIKO_MODE=record npm test   # refresh every cassette
 Identical requests are answered in the order they were recorded. A missing cassette only fails a
 test that actually sends a request.
 
+Transient errors (408, 429 and 5xx) are passed through while recording but not saved, so an outage
+during a recording run can't replay forever; the SDK's retry is what gets recorded. To keep them,
+set `recordErrors: true`, or better, simulate them with [`faults`](#test-the-failure-paths).
+
 </details>
 
 <details>
@@ -308,6 +313,7 @@ Leave volatile fields out of matching with `ignore: ["metadata.user_id", "messag
 | `fuzzy` | `false` | similarity threshold for near matches |
 | `ignore` | `[]` | request body paths left out of matching |
 | `faults` | `[]` | simulated failures |
+| `recordErrors` | `false` | also save transient errors (408, 429, 5xx) |
 | `intercept` | every request | `(request) => boolean`; others go straight to the network |
 | `redact` | none | `(interaction) => interaction`, applied before saving |
 | `pricing` | Anthropic list prices | USD per million tokens, merged over the built-in table |
@@ -322,13 +328,26 @@ Pass them per cassette, or set defaults once with `configure()`.
 
 <br>
 
-Every cassette reports tokens and estimated cost; `formatSummary()` prints a summary:
+Every cassette reports tokens and estimated cost. `printSummary()` prints the totals, in color
+when the output is a terminal (`NO_COLOR` and `FORCE_COLOR` are respected):
+
+```ts
+// vitest.setup.ts
+import { afterAll } from "vitest";
+import { printSummary, summary } from "tomiko";
+
+afterAll(() => {
+  if (summary().cassettes > 0) printSummary();
+});
+```
 
 ```
 tomiko · 7 cassettes · 5 replayed · 1 recorded
 tokens · 11.0K in · 1.9K out · 72.0K cache read · 0 cache write
 cost  · $0.0960 est. · $0.0800 saved by replay
 ```
+
+`formatSummary()` returns the same text as a string, plain unless you pass `{ color: true }`.
 
 Usage is read from Anthropic and OpenAI responses, streamed or not. Anthropic prices are built in;
 add others with `pricing: { "my-model": { input: 2, output: 8 } }`. A model with no price is

@@ -111,7 +111,8 @@ describe("with @anthropic-ai/sdk", () => {
   it("surfaces replayed API errors as typed SDK errors", async () => {
     const dir = tmpDir();
     const api = fakeApi(() => json({ type: "error", error: { type: "rate_limit_error", message: "slow down" } }, 429));
-    const call = () => cassette("sdk-429", () => client.messages.create({ ...params, max_tokens: 1024 }), { dir, fetch: api });
+    const call = () =>
+      cassette("sdk-429", () => client.messages.create({ ...params, max_tokens: 1024 }), { dir, fetch: api, recordErrors: true });
     await expect(call()).rejects.toBeInstanceOf(Anthropic.RateLimitError);
     process.env.TOMIKO_MODE = "replay";
     await expect(call()).rejects.toBeInstanceOf(Anthropic.RateLimitError);
