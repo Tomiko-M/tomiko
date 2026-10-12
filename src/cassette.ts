@@ -53,6 +53,11 @@ function liveHeaders(headers: Headers): Headers {
   return copy;
 }
 
+/** Timeouts, rate limits and server errors: worth retrying, not worth replaying. */
+function isTransient(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
 function modelOf(body: unknown): unknown {
   return body !== null && typeof body === "object" ? (body as { model?: unknown }).model : undefined;
 }
@@ -172,7 +177,7 @@ export class Cassette {
     const recordedRequest: RecordedRequest = {
       method: request.method,
       url: redactUrl(request.url),
-      body: parseRequestBody(bodyText),
+      body: parseRequestBody(bodyText, request.headers.get("content-type")),
     };
 
     const faults = this.faultPlan.next(recordedRequest);
@@ -305,12 +310,22 @@ export class Cassette {
       },
       meta: { provider: detectProvider(request.url, request.headers), recordedAt: new Date().toISOString(), durationMs: 0 },
     };
-    this.interactions.push(interaction);
-    this.recorded.push(interaction);
     const entry: ServedEntry = { interaction, replayed: false };
     this.served.push(entry);
-    this.used.add(interaction);
     const init = { status: res.status, statusText: res.statusText, headers: liveHeaders(res.headers) };
+
+    const keep = !isTransient(res.status) || this.options.recordErrors === true;
+    if (keep) {
+      this.interactions.push(interaction);
+      this.recorded.push(interaction);
+      this.used.add(interaction);
+    } else {
+      this.warnings.push(
+        `Not saved: ${res.status} from ${recordedRequest.method} ${recordedRequest.url} is a transient error, ` +
+          `so it would replay forever. Set \`recordErrors: true\` to keep it, or simulate it with \`faults\`.`,
+      );
+      if (res.body && isEventStream(contentType)) return { response: withUrl(new Response(res.body, init), request.url), entry };
+    }
 
     if (isEventStream(contentType) && res.body) {
       const chunks: string[] = [];

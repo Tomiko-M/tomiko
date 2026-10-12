@@ -1,20 +1,20 @@
 name: Release
 
-# Publishes to npm when a GitHub release is published. npm trusts this workflow directly
-# (trusted publishing), so no npm token is stored.
+# Pushing a version tag publishes it: to npm through trusted publishing (no npm token is stored),
+# then as a GitHub release whose notes are the tag's message.
 #
 # One-time setup, after the first `npm publish` by hand: on npmjs.com open the package →
 # Settings → Trusted Publisher → GitHub Actions: owner saykachi, repository tomiko, workflow
-# release.yml.
+# release.yml, with "Allow npm publish" checked.
 #
-# To release: `npm version patch|minor|major`, then `git push --follow-tags`, then on GitHub
-# Releases → Draft a new release → pick the tag → Generate release notes → Publish release.
+# To release: `npm version patch|minor|major`, then `git push --follow-tags`. Creating the release
+# in GitHub's UI with a new tag works too; this workflow then leaves that release as it is.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write # create the GitHub release
   id-token: write # lets npm verify this workflow and sign provenance
 
 jobs:
@@ -30,11 +30,11 @@ jobs:
       - name: Update npm (trusted publishing needs 11.5.1 or newer)
         run: npm install -g npm@latest
       - run: npm ci
-      - name: Check the release tag matches package.json
+      - name: Check the tag matches package.json
         run: |
           expected="v$(node -p 'require("./package.json").version')"
           if [ "$GITHUB_REF_NAME" != "$expected" ]; then
-            echo "::error::Release tag $GITHUB_REF_NAME does not match package.json version $expected"
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $expected"
             exit 1
           fi
       # Re-running a release, or tagging a version that was published by hand, is not an error.
@@ -48,11 +48,25 @@ jobs:
           fi
       # prepublishOnly runs the typecheck, tests, build and smoke test before anything is uploaded.
       # Pre-releases (1.2.0-beta.1) go to the `next` tag so `npm install tomiko` keeps the stable one.
-      - name: Publish
+      - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
+        env:
+          # npm only signs provenance for public repositories and refuses to publish otherwise.
+          NPM_CONFIG_PROVENANCE: ${{ !github.event.repository.private }}
         run: |
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             npm publish --access public --tag next
           else
             npm publish --access public
           fi
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "::notice::Release $GITHUB_REF_NAME already exists"
+            exit 0
+          fi
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-from-tag "${flags[@]}"

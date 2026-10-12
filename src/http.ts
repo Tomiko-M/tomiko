@@ -16,9 +16,15 @@ export function redactUrl(url: string): string {
   return parsed.toString();
 }
 
-/** Parses a request body as JSON when possible, falling back to the raw text. */
-export function parseRequestBody(text: string | undefined): unknown {
+/**
+ * Parses a request body as JSON when possible, falling back to the raw text. Multipart bodies
+ * (file uploads) get a fixed boundary: clients pick a random one per request, which would
+ * otherwise keep every upload from ever matching its recording.
+ */
+export function parseRequestBody(text: string | undefined, contentType?: string | null): unknown {
   if (text === undefined || text === "") return undefined;
+  const boundary = /^multipart\/[^;]+;.*boundary="?([^";]+)"?/i.exec(contentType ?? "")?.[1];
+  if (boundary) return text.split(boundary).join("tomiko-boundary");
   try {
     return JSON.parse(text);
   } catch {
@@ -46,10 +52,18 @@ const isTextual = (contentType: string) =>
   contentType === "" ||
   /^text\/|json|xml|javascript|x-www-form-urlencoded|ndjson/.test(contentType);
 
+const base64 = (bytes: Uint8Array): RecordedBody => ({ type: "base64", value: Buffer.from(bytes).toString("base64") });
+
 export function encodeBody(bytes: Uint8Array, contentType: string): RecordedBody {
   if (bytes.byteLength === 0) return { type: "empty" };
-  if (!isTextual(contentType)) return { type: "base64", value: Buffer.from(bytes).toString("base64") };
-  const text = new TextDecoder().decode(bytes);
+  if (!isTextual(contentType)) return base64(bytes);
+  let text: string;
+  try {
+    // Without a content type, only valid UTF-8 is stored as text; anything else would be mangled.
+    text = new TextDecoder("utf-8", { fatal: contentType === "" }).decode(bytes);
+  } catch {
+    return base64(bytes);
+  }
   if (contentType.includes("json")) {
     try {
       return { type: "json", value: JSON.parse(text) };

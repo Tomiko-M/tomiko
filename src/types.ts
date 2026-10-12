@@ -92,6 +92,11 @@ export interface TomikoOptions {
   fetch?: typeof globalThis.fetch;
   /** Simulated failures for testing retries and error handling. Build them with `fault.*`. */
   faults?: Fault[];
+  /**
+   * Also save transient errors (408, 429 and 5xx). By default they are passed to the caller but not
+   * saved, since a recorded outage would replay forever. Simulate failures with `faults` instead.
+   */
+  recordErrors?: boolean;
 }
 
 export interface CassetteReport {

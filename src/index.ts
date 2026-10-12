@@ -7,7 +7,7 @@ export { CassetteNotFoundError, NestedCassetteError, RequestMismatchError, Tomik
 export { fault, type Fault, type FaultName, type FaultRequest, type FaultTarget } from "./faults.js";
 export { matchers, type RequestCount, type TomikoMatchers } from "./matchers.js";
 export { defaultPricing, costOf, priceFor } from "./pricing.js";
-export { formatSummary, reports, resetReports, summary, type Summary } from "./report.js";
+export { formatSummary, printSummary, reports, resetReports, summary, type FormatOptions, type Summary } from "./report.js";
 export type * from "./types.js";
 
 /** Sets defaults for every cassette opened afterwards, e.g. in a test setup file. */

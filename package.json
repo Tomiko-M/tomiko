@@ -1,6 +1,6 @@
 {
   "name": "tomiko",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Record & replay LLM API calls in tests. Zero tokens, millisecond runs, deterministic CI.",
   "keywords": [
     "llm",
