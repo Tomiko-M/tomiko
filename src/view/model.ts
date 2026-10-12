@@ -1,8 +1,8 @@
-import { readContent } from "../inspect.js";
+import { readContent, stopReason } from "../inspect.js";
 import { canonical } from "../match.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
 import type { CassetteFile, Interaction, PricingTable, RecordedBody, ToolCall, Usage } from "../types.js";
-import { addUsage, detectProvider, emptyUsage, extractUsage, parseSseData } from "../usage.js";
+import { addUsage, detectProvider, emptyUsage, extractUsage } from "../usage.js";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -168,24 +168,6 @@ function requestView(body: unknown): RequestView {
     return { system: str(body.instructions), rawMessages: items, messages: items.map(responsesItem), tools };
   }
   return { rawMessages: [], messages: [], tools };
-}
-
-function stopReason(body: RecordedBody): string | undefined {
-  const fromObj = (o: unknown): string | undefined => {
-    if (!isObj(o)) return undefined;
-    if (typeof o.stop_reason === "string") return o.stop_reason;
-    if (isObj(o.delta) && typeof o.delta.stop_reason === "string") return o.delta.stop_reason;
-    if (Array.isArray(o.choices)) {
-      const reason = o.choices.filter(isObj).map((c) => c.finish_reason).find((r) => typeof r === "string");
-      if (typeof reason === "string") return reason;
-    }
-    if (o.object === "response" && typeof o.status === "string") return o.status;
-    if (o.type === "response.completed" && isObj(o.response)) return str(o.response.status);
-    return undefined;
-  };
-  if (body.type === "json") return fromObj(body.value);
-  if (body.type === "sse") return parseSseData(body.chunks).map(fromObj).filter(Boolean).pop();
-  return undefined;
 }
 
 function rawBody(body: RecordedBody): unknown {

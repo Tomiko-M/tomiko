@@ -3,11 +3,31 @@ import { activate, assertNoActiveCassette, dispatch, mergeOptions, runtime } fro
 import type { TomikoOptions } from "./types.js";
 
 export { Cassette, resolveMode } from "./cassette.js";
+export {
+  diffCassettes,
+  summarizeDiff,
+  type CassetteDiff,
+  type Change,
+  type DiffOptions,
+  type DiffSummary,
+  type Impact,
+  type RequestChanges,
+  type RequestDiff,
+  type ResponseChanges,
+  type Side,
+  type TextChange,
+  type ToolInputChange,
+  type ToolsChange,
+  type Totals,
+} from "./compare.js";
 export { CassetteNotFoundError, NestedCassetteError, RequestMismatchError, TomikoError } from "./errors.js";
 export { fault, type Fault, type FaultName, type FaultRequest, type FaultTarget } from "./faults.js";
+export type { DiffEntry } from "./match.js";
 export { matchers, type RequestCount, type TomikoMatchers } from "./matchers.js";
 export { defaultPricing, costOf, priceFor } from "./pricing.js";
 export { formatSummary, printSummary, reports, resetReports, summary, type FormatOptions, type Summary } from "./report.js";
+export { findSecrets, SecretsFoundError } from "./secrets.js";
+export type { Piece } from "./words.js";
 export type * from "./types.js";
 
 /** Sets defaults for every cassette opened afterwards, e.g. in a test setup file. */

@@ -14,6 +14,16 @@ import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
 import { realFetch } from "./runtime.js";
+import {
+  type Found,
+  type Guard,
+  publicFindings,
+  redactInteractions,
+  scanInteractions,
+  SecretsFoundError,
+  secretGuard,
+  withoutSecrets,
+} from "./secrets.js";
 import { cassettePath, loadCassette, saveCassette } from "./store.js";
 import type {
   CassetteReport,
@@ -85,6 +95,23 @@ interface Lookup {
   score?: number;
 }
 
+/** A request as matching sees it: secrets replaced by placeholders and ignored paths removed. */
+interface MatchKey {
+  url: string;
+  body: unknown;
+  canonical: string;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** `Anthropic API key (#1 request body › messages[0].content)`, for one-line warnings. */
+function listFindings(found: Found[]): string {
+  const findings = publicFindings(found);
+  const shown = findings.slice(0, 3).map((f) => `${f.kind} (#${f.request} ${f.location})`);
+  if (findings.length > 3) shown.push(`${findings.length - 3} more`);
+  return shown.join(", ");
+}
+
 export class Cassette {
   readonly fetch: typeof globalThis.fetch;
 
@@ -101,7 +128,11 @@ export class Cassette {
   private readonly ignore: string[];
   private readonly fuzzy: number | false;
   private readonly baseFetch: typeof globalThis.fetch;
+  private readonly guard: Guard | undefined;
+  private readonly keys = new WeakMap<RecordedRequest, MatchKey>();
   private report: CassetteReport | undefined;
+  /** The interactions came from a file, which may predate the secrets guard. */
+  private loaded = false;
   /** Replay mode without a file only fails once a request needs it, so tests without LLM calls pass. */
   private missing = false;
 
@@ -119,6 +150,7 @@ export class Cassette {
       throw new TomikoError(`\`fuzzy\` must be a number in (0, 1] or false, got ${this.fuzzy}`);
     }
     this.baseFetch = options.fetch ?? realFetch();
+    this.guard = secretGuard(options.secrets);
     this.faultPlan = new FaultPlan(options.faults ?? []);
     this.fetch = (input, init) => this.handle(input, init);
   }
@@ -129,6 +161,7 @@ export class Cassette {
     const existing = mode === "record" ? undefined : await loadCassette(file);
     const cassette = new Cassette(name, file, mode, existing?.interactions ?? [], options);
     cassette.missing = mode === "replay" && !existing;
+    cassette.loaded = existing !== undefined;
     return cassette;
   }
 
@@ -210,7 +243,7 @@ export class Cassette {
       if (this.mode === "replay") {
         throw new RequestMismatchError(
           recordedRequest.method,
-          recordedRequest.url,
+          this.key(recordedRequest).url,
           this.name,
           found.nearest ? this.describeDiff(found.nearest, recordedRequest) : null,
           found.score ?? null,
@@ -246,12 +279,23 @@ export class Cassette {
     return buildResponse(interaction.response, request.url);
   }
 
-  private matchable(body: unknown): unknown {
-    return stripPaths(body, this.ignore);
+  /**
+   * Secrets are replaced before matching, so a cassette saved with `secrets: "redact"` still
+   * matches the live request, and no diff in an error message can print one.
+   */
+  private key(request: RecordedRequest): MatchKey {
+    let key = this.keys.get(request);
+    if (!key) {
+      const clean = this.guard ? withoutSecrets(request, this.guard) : request;
+      const body = stripPaths(clean.body, this.ignore);
+      key = { url: clean.url, body, canonical: canonical(body) };
+      this.keys.set(request, key);
+    }
+    return key;
   }
 
   private describeDiff(recorded: Interaction, live: RecordedRequest): string {
-    return formatDiff(diff(this.matchable(recorded.request.body), this.matchable(live.body)));
+    return formatDiff(diff(this.key(recorded.request).body, this.key(live).body));
   }
 
   /**
@@ -260,9 +304,9 @@ export class Cassette {
    * for a fuzzy replay or for the mismatch error.
    */
   private lookup(req: RecordedRequest): Lookup {
-    const key = canonical(this.matchable(req.body));
-    const endpoint = this.interactions.filter((i) => i.request.method === req.method && i.request.url === req.url);
-    const exact = endpoint.filter((i) => canonical(this.matchable(i.request.body)) === key);
+    const live = this.key(req);
+    const endpoint = this.interactions.filter((i) => i.request.method === req.method && this.key(i.request).url === live.url);
+    const exact = endpoint.filter((i) => this.key(i.request).canonical === live.canonical);
     if (exact.length > 0) {
       const next = exact.find((i) => !this.used.has(i));
       if (next) {
@@ -277,7 +321,7 @@ export class Cassette {
     let nearest: Interaction | undefined;
     let score = -1;
     for (const candidate of unused.length > 0 ? unused : endpoint) {
-      const s = similarity(this.matchable(candidate.request.body), this.matchable(req.body));
+      const s = similarity(this.key(candidate.request).body, live.body);
       if (s > score) {
         score = s;
         nearest = candidate;
@@ -290,7 +334,7 @@ export class Cassette {
       this.used.add(nearest);
       const warning =
         `Fuzzy match (${Math.round(score * 100)}% similar) in cassette "${this.name}" ` +
-        `for ${req.method} ${req.url}:\n${this.describeDiff(nearest, req)}`;
+        `for ${req.method} ${live.url}:\n${this.describeDiff(nearest, req)}`;
       return { match: nearest, warning };
     }
     return { nearest, score };
@@ -371,15 +415,44 @@ export class Cassette {
     );
   }
 
-  /** Waits for in-flight stream recordings, saves new recordings, and returns the run report. */
+  /**
+   * Waits for in-flight stream recordings, saves new recordings, and returns the run report.
+   * Throws `SecretsFoundError`, saving nothing, when the cassette would contain a secret.
+   */
   async close(): Promise<CassetteReport> {
     if (this.report) return this.report;
     await Promise.all(this.pending.map((settle) => settle()));
-    const saved = this.recorded.some((i) => this.interactions.includes(i));
+    let saved = this.recorded.some((i) => this.interactions.includes(i));
+    let refused: SecretsFoundError | undefined;
     if (saved) {
       const redact = this.options.redact;
-      const interactions = redact ? this.interactions.map((i) => redact(structuredClone(i))) : this.interactions;
-      await saveCassette(this.file, { version: 1, interactions });
+      let interactions = redact ? this.interactions.map((i) => redact(structuredClone(i))) : this.interactions;
+      const guarded = this.guard ? redactInteractions(interactions, this.guard) : undefined;
+      if (guarded && guarded.found.length > 0) {
+        const count = plural(publicFindings(guarded.found).length, "secret");
+        if (this.guard!.action === "fail") {
+          refused = new SecretsFoundError(this.name, this.file, publicFindings(guarded.found));
+          this.warnings.push(`Not saved: cassette "${this.name}" contains ${count}: ${listFindings(guarded.found)}.`);
+          saved = false;
+        } else if (this.guard!.action === "redact") {
+          interactions = guarded.interactions;
+          this.warnings.push(`Redacted ${count} in cassette "${this.name}": ${listFindings(guarded.found)}.`);
+        } else {
+          this.warnings.push(`Saved cassette "${this.name}" with ${count} in it: ${listFindings(guarded.found)}.`);
+        }
+      }
+      if (saved) await saveCassette(this.file, { version: 1, interactions });
+    } else if (this.guard && this.loaded) {
+      // Nothing to save, but a cassette recorded before the guard (or with it off) may hold secrets.
+      const found = scanInteractions(this.interactions, this.guard);
+      const count = publicFindings(found).length;
+      if (count > 0) {
+        const them = count === 1 ? "it" : "them";
+        this.warnings.push(
+          `Cassette "${this.name}" contains ${plural(count, "secret")}: ${listFindings(found)}. ` +
+            `Run \`npx tomiko scan --fix\` to replace ${them}, and revoke ${them} if the file was ever committed.`,
+        );
+      }
     }
     this.report = buildReport({
       name: this.name,
@@ -392,6 +465,7 @@ export class Cassette {
       pricing: this.pricing,
     });
     recordReport(this.report);
+    if (refused) throw refused;
     return this.report;
   }
 }

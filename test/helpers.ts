@@ -223,3 +223,21 @@ export function openaiResponseStream(parts: string[], model = "gpt-test") {
     event("response.completed", { response: done }),
   ];
 }
+
+/**
+ * Secrets that look real. They are built at run time so that no key-shaped literal appears in the
+ * source, where secret scanners (GitHub push protection among them) would rightly object.
+ */
+const ALPHABET = "Q7mZ2xK9pL4vB8nR1tY6wC3jH5dF0gSaEuIoPqWrTyUiOlKjHgFdSaZxCvBnM";
+export const random = (n: number, offset = 0) => Array.from({ length: n }, (_, i) => ALPHABET[(i * 7 + offset) % ALPHABET.length]).join("");
+export const keys = {
+  anthropic: ["sk", "ant", "api03", random(93) + "AA"].join("-"),
+  openai: ["sk", "proj", random(80, 3)].join("-"),
+  google: "AIza" + "Sy" + random(33, 5),
+  github: "gh" + "p_" + random(36, 11),
+  stripe: "sk_" + "live_" + random(24, 13),
+  slack: "xo" + "xb-" + "1234567890-" + random(24, 17),
+  aws: "AK" + "IA" + "Z7Q2X3N4M5P6R7S8",
+  huggingface: "hf" + "_" + random(34, 19),
+  groq: "gs" + "k_" + random(52, 23),
+};

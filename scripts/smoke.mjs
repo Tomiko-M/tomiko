@@ -45,4 +45,10 @@ assert.match(output, /✔ 1 cassette, 1 request\n/);
 assert.ok(!output.includes("\x1b"), "no colors when the output is not a terminal");
 assert.match(readFileSync(page, "utf8"), /claude-opus-5-5/);
 
+// The other commands run from the build too: a clean scan, and a diff of the cassette with itself.
+const cli = (...args) => execFileSync(process.execPath, [new URL("../bin/tomiko.js", import.meta.url).pathname, ...args], { encoding: "utf8", cwd: dir });
+assert.match(cli("scan", dir), /✔ No secrets in 1 cassette/);
+const file = join(dir, "smoke.json");
+assert.match(cli("diff", file, file), /✔ 1 cassette re-recorded, and the model behaves the same/);
+
 console.log(`smoke ok on node ${process.version}`);

@@ -97,6 +97,55 @@ export interface TomikoOptions {
    * saved, since a recorded outage would replay forever. Simulate failures with `faults` instead.
    */
   recordErrors?: boolean;
+  /**
+   * Guards cassettes against API keys and other secrets before they are written. Default: `"fail"`,
+   * which saves nothing and fails the test. `"redact"` replaces each secret with a placeholder, and
+   * `"warn"` saves as is. Pass an object to allow values or add your own formats; `false` turns the
+   * guard off.
+   */
+  secrets?: SecretAction | SecretsOptions | false;
+}
+
+/**
+ * What happens when a recording about to be saved contains a secret:
+ * - `fail`    save nothing and fail the test (default)
+ * - `redact`  replace each secret with a placeholder such as `[REDACTED:anthropic-api-key]`, then save
+ * - `warn`    save as is and add a warning to the report
+ */
+export type SecretAction = "fail" | "redact" | "warn";
+
+export interface SecretsOptions {
+  action?: SecretAction;
+  /** Values that look like secrets but are safe to commit, e.g. fake keys in your fixtures. */
+  allow?: (string | RegExp)[];
+  /**
+   * Your own secret formats, on top of the built-in ones. A named group `secret` marks the part to
+   * hide: `/acme_id=\w+;key=(?<secret>\w+)/`.
+   */
+  patterns?: (RegExp | { name: string; pattern: RegExp })[];
+  /**
+   * Also look for the values of your environment variables named like secrets (`*_API_KEY`,
+   * `*_TOKEN`, `*_SECRET`, `*_PASSWORD`), whatever their format. Default: true.
+   */
+  env?: boolean;
+}
+
+/** A secret found in a cassette. Only a masked preview of it is ever included. */
+export interface SecretFinding {
+  /** What it is: `"Anthropic API key"`, `"Value of $MISTRAL_API_KEY"`, `"Value of \"password\""`. */
+  kind: string;
+  /** The rule that found it, which also names its placeholder: `"anthropic-api-key"`. */
+  rule: string;
+  /** The environment variable holding this same value, when it is one of yours. */
+  env?: string;
+  /** `"sk-ant-api03-…f9Qa"`: a public prefix and the last four characters at most. */
+  preview: string;
+  /** The 1-based position of the request it first appears in. */
+  request: number;
+  /** Where in that request: `"request body › messages[0].content"`. */
+  location: string;
+  /** How many places in the cassette hold this same secret. */
+  occurrences: number;
 }
 
 export interface CassetteReport {

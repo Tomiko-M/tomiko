@@ -16,7 +16,7 @@
 **The first run records real LLM responses. Every run after replays them.**<br>
 Agent tests that run offline in milliseconds, cost nothing, and give the same answer every time.
 
-[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Reference](#reference)
+[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Diff](#see-what-the-model-does-differently) · [Secrets](#keep-keys-out-of-git) · [Reference](#reference)
 
 </div>
 
@@ -85,7 +85,8 @@ paths.
 <td valign="top">
 
 **Diffs you can read**<br>
-Change a prompt and the failure shows the changed words, not two blobs of JSON.
+Re-record and `tomiko diff` shows what the model now does differently: other tools, a cut-off
+answer, changed words, a new cost.
 
 </td>
 </tr>
@@ -93,7 +94,8 @@ Change a prompt and the failure shows the changed words, not two blobs of JSON.
 <td valign="top">
 
 **Safe to commit**<br>
-API keys and request headers are never written to disk. Secret query parameters are redacted.
+A recording with an API key in it is never saved, whether the key is in a prompt, a tool result
+or the answer. Request headers are never stored.
 
 </td>
 <td valign="top">
@@ -163,6 +165,72 @@ tokens, cost and time of each step. One HTML file, no server, ready to attach to
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/viewer-dark.png">
   <img alt="tomiko view showing an agent run as a conversation, with tool calls, results and per-step cost" src="docs/viewer-light.png" width="100%">
+</picture>
+
+## See what the model does differently
+
+Models change under you: a provider updates one, you switch to a newer one, a prompt gets
+rewritten. Re-record, then ask what changed:
+
+```sh
+TOMIKO_MODE=record npx vitest run
+npx tomiko diff
+```
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diff-dark.png">
+  <img alt="tomiko diff showing a new tool call, an answer cut off at the token limit, a changed word in the answer, a changed field in a JSON answer, and the cost going up 67%" src="docs/diff-light.png" width="100%">
+</picture>
+
+It compares the cassettes with the last commit by what the model did, not by their bytes. Ids,
+timestamps and timing are ignored, so a re-recording that changed nothing that matters says so.
+Each changed cassette is labelled by its biggest change:
+
+| | |
+| --- | --- |
+| **behavior changed** | other tools or arguments, another stop reason or status, different data in a JSON answer, more or fewer requests |
+| **same behavior, new wording** | the same tools and data, said differently; with how many words stayed the same |
+| **request changed, same answers** | you changed a prompt, a parameter or a tool, and the answers held |
+
+`--base main` compares with another revision, `--full` shows whole answers, `--json` prints the
+comparison for scripts, and `--exit-code` exits with 1 when anything changed. Without git,
+compare two files: `tomiko diff old.json new.json`. From code, `diffCassettes(path, before, after)`
+returns the same comparison.
+
+## Keep keys out of git
+
+Cassettes get committed, so a key that ends up in one gets published. Keys find their way in more
+often than you would think: an agent reads a `.env` file with a tool, a prompt includes a config, a
+model repeats what it was given.
+
+tomiko checks every recording before it saves it. When it finds a secret, it saves nothing and
+fails the test with where the secret is, never the secret itself:
+
+```
+SecretsFoundError: Cassette "agent.test.ts/reads the config" was not saved: it contains 1 secret.
+
+  ● Anthropic API key  sk-ant-api03-…f9Qa  your $ANTHROPIC_API_KEY
+    #2 request body › messages[3].content[0].content
+
+Nothing was written to __cassettes__/agent.test.ts/reads-the-config.json. To save it:
+  · secrets: "redact"           replaces each one with a placeholder; replays still match
+  · redact: (interaction) => …  scrubs them yourself before saving
+  · secrets: { allow: [...] }   for values that are not real secrets
+```
+
+It knows 20 key formats (Anthropic, OpenAI, Google, GitHub, AWS, Stripe, Slack, Hugging Face,
+Groq, xAI, private keys, JWTs and more), the values of your own environment variables named like
+secrets (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`), whatever their format, and values of
+fields such as `password` or `client_secret`. A key the model spelled out over several streamed
+events is found too. Placeholders like `sk-ant-xxxx` and documentation examples are not flagged.
+
+For cassettes you already have, `npx tomiko scan` finds secrets, points at the line, and says
+which ones are already in git. `--fix` replaces them with placeholders, and replays keep working.
+It exits with 1 when it finds any, so it can guard CI or a pre-commit hook.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/scan-dark.png">
+  <img alt="tomiko scan listing a GitHub token, an Anthropic API key that matches the ANTHROPIC_API_KEY environment variable, and a password in a database URL, two of them already committed" src="docs/scan-light.png" width="100%">
 </picture>
 
 ## Works with
@@ -316,10 +384,51 @@ Leave volatile fields out of matching with `ignore: ["metadata.user_id", "messag
 | `recordErrors` | `false` | also save transient errors (408, 429, 5xx) |
 | `intercept` | every request | `(request) => boolean`; others go straight to the network |
 | `redact` | none | `(interaction) => interaction`, applied before saving |
+| `secrets` | `"fail"` | what to do with a secret in a recording: `"fail"`, `"redact"`, `"warn"`, or `false`; see secrets |
 | `pricing` | Anthropic list prices | USD per million tokens, merged over the built-in table |
 | `fetch` | `globalThis.fetch` | what recording uses to reach the network |
 
 Pass them per cassette, or set defaults once with `configure()`.
+
+</details>
+
+<details>
+<summary><b>Secrets</b>: actions, placeholders, allowed values, your own formats</summary>
+
+<br>
+
+| `secrets` | A recording with a secret in it |
+| --- | --- |
+| `"fail"` (default) | is not saved, and the test fails with where each secret is |
+| `"redact"` | is saved with each secret replaced by a placeholder such as `[REDACTED:anthropic-api-key]` |
+| `"warn"` | is saved as is, with a warning in the report |
+| `false` | is saved without being checked |
+
+A redacted request still matches: tomiko replaces the same secrets in the live request before
+comparing. The value of an environment variable becomes `[REDACTED:$NAME]`.
+
+For finer control, pass an object:
+
+```ts
+configure({
+  secrets: {
+    action: "redact",
+    allow: ["sk-test-fixture-key", /^ghp_FAKE/], // values that look like secrets but aren't
+    patterns: [{ name: "Acme API key", pattern: /acme_key=(?<secret>\w{32})/ }], // `secret` marks the part to hide
+    env: true, // look for the values of *_API_KEY, *_TOKEN… variables (default)
+  },
+});
+```
+
+A cassette recorded before the check, or with it off, gets a warning when it is replayed, pointing
+to `npx tomiko scan --fix`. `findSecrets(cassette)` runs the same check from code and returns
+findings with masked previews only.
+
+To scan in CI, or on every commit with [lint-staged](https://github.com/lint-staged/lint-staged):
+
+```json
+{ "lint-staged": { "**/__cassettes__/**/*.json": "tomiko scan" } }
+```
 
 </details>
 
@@ -378,7 +487,8 @@ Plain JSON, so a changed prompt shows up in code review next to the code that ch
 - **Never stored:** request headers, including `x-api-key` and `authorization`.
 - **Response headers:** only `content-type`, `retry-after`, `request-id`, `x-request-id`.
 - **Redacted:** query parameters such as `key`, `api_key`, `token`.
-- **Stored as is:** request and response bodies. Scrub personal data with `redact`.
+- **Checked for secrets:** everything else, before it is saved; see [secrets](#keep-keys-out-of-git).
+- **Stored as is:** request and response bodies otherwise. Scrub personal data with `redact`.
 
 </details>
 

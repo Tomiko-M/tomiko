@@ -133,3 +133,22 @@ export function readContent(body: RecordedBody): ResponseContent {
   if (body.type === "sse") return fromEvents(parseSseData(body.chunks));
   return { text: "", toolCalls: [] };
 }
+
+/** Why the model stopped: `end_turn`, `tool_use`, `max_tokens`, `stop`, `length`, `completed`… */
+export function stopReason(body: RecordedBody): string | undefined {
+  const fromObj = (o: unknown): string | undefined => {
+    if (!isObj(o)) return undefined;
+    if (typeof o.stop_reason === "string") return o.stop_reason;
+    if (isObj(o.delta) && typeof o.delta.stop_reason === "string") return o.delta.stop_reason;
+    if (Array.isArray(o.choices)) {
+      const reason = o.choices.filter(isObj).map((c) => c.finish_reason).find((r) => typeof r === "string");
+      if (typeof reason === "string") return reason;
+    }
+    if (o.object === "response" && typeof o.status === "string") return o.status;
+    if (o.type === "response.completed" && isObj(o.response)) return str(o.response.status);
+    return undefined;
+  };
+  if (body.type === "json") return fromObj(body.value);
+  if (body.type === "sse") return parseSseData(body.chunks).map(fromObj).filter(Boolean).pop();
+  return undefined;
+}
