@@ -8,7 +8,7 @@
 <br>
 
 [![npm](https://img.shields.io/npm/v/tomiko?color=c2491f&label=npm)](https://www.npmjs.com/package/tomiko)
-[![CI](https://github.com/saykachi/tomiko/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/saykachi/tomiko/actions/workflows/ci.yml)
+[![CI](https://github.com/Tomiko-M/tomiko/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Tomiko-M/tomiko/actions/workflows/ci.yml)
 ![node](https://img.shields.io/badge/node-%E2%89%A520-2f7a4b)
 ![dependencies](https://img.shields.io/badge/dependencies-0-2f7a4b)
 [![license](https://img.shields.io/badge/license-MIT-6b6862)](LICENSE)

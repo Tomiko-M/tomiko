@@ -4,7 +4,7 @@ name: Release
 # then as a GitHub release whose notes are the tag's message.
 #
 # One-time setup, after the first `npm publish` by hand: on npmjs.com open the package →
-# Settings → Trusted Publisher → GitHub Actions: owner saykachi, repository tomiko, workflow
+# Settings → Trusted Publisher → GitHub Actions: owner Tomiko-M, repository tomiko, workflow
 # release.yml, with "Allow npm publish" checked.
 #
 # To release: `npm version patch|minor|major`, then `git push --follow-tags`. Creating the release

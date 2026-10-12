@@ -25,10 +25,10 @@
   "author": "saykachi",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/saykachi/tomiko.git"
+    "url": "git+https://github.com/Tomiko-M/tomiko.git"
   },
-  "homepage": "https://github.com/saykachi/tomiko#readme",
-  "bugs": "https://github.com/saykachi/tomiko/issues",
+  "homepage": "https://github.com/Tomiko-M/tomiko#readme",
+  "bugs": "https://github.com/Tomiko-M/tomiko/issues",
   "type": "module",
   "bin": {
     "tomiko": "bin/tomiko.js"
