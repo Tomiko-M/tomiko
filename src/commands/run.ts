@@ -37,8 +37,10 @@ export function quote(word: string): string {
   return process.platform === "win32" ? `"${word.replace(/"/g, '""')}"` : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
+export type Runner = "vitest" | "jest" | "npm";
+
 /** The nearest package.json's test runner: Vitest or Jest run directly, anything else through `npm test`. */
-function runner(cwd: string): "vitest" | "jest" | "npm" {
+export function runner(cwd: string): Runner {
   for (let dir = resolve(cwd); ; dir = dirname(dir)) {
     const file = join(dir, "package.json");
     if (existsSync(file)) {
@@ -60,13 +62,48 @@ function runner(cwd: string): "vitest" | "jest" | "npm" {
  * The command that runs the tests: `--` and what follows it when given, otherwise the project's
  * runner, limited to `files` when the runner can take them.
  */
-export function testCommand(cwd: string, given: string[], files: string[] = []): string {
+export function testCommand(cwd: string, given: string[], files: string[] = [], extra: string[] = []): string {
   if (given.length > 0) return given.map(quote).join(" ");
   const tool = runner(cwd);
-  const only = files.map((f) => quote(relative(cwd, f) || f)).join(" ");
-  if (tool === "vitest") return `npx vitest run${only ? ` ${only}` : ""}`;
-  if (tool === "jest") return `npx jest${only ? ` ${only}` : ""}`;
+  const args = [...files.map((f) => relative(cwd, f) || f), ...extra].map(quote).join(" ");
+  if (tool === "vitest") return `npx vitest run${args ? ` ${args}` : ""}`;
+  if (tool === "jest") return `npx jest${args ? ` ${args}` : ""}`;
   return "npm test";
+}
+
+/** Arguments that make the runner write its results as JSON to `file`, when it can. */
+export function jsonReport(cwd: string, given: string[], file: string): string[] {
+  if (given.length > 0) return [];
+  const tool = runner(cwd);
+  if (tool === "vitest") return ["--reporter=json", `--outputFile=${file}`];
+  if (tool === "jest") return ["--json", `--outputFile=${file}`];
+  return [];
+}
+
+export interface TestResults {
+  total: number;
+  passed: number;
+  /** `agent.test.ts > plans a trip` */
+  failed: string[];
+}
+
+/** Reads a Vitest or Jest JSON report: they share a format. */
+export function readReport(file: string): TestResults | undefined {
+  try {
+    const report = JSON.parse(readFileSync(file, "utf8")) as {
+      numTotalTests?: number;
+      numPassedTests?: number;
+      testResults?: { name?: string; assertionResults?: { fullName?: string; title?: string; status?: string }[] }[];
+    };
+    const failed = (report.testResults ?? []).flatMap((suite) =>
+      (suite.assertionResults ?? [])
+        .filter((test) => test.status === "failed")
+        .map((test) => `${basename(suite.name ?? "")} > ${test.fullName ?? test.title ?? "?"}`),
+    );
+    return { total: report.numTotalTests ?? 0, passed: report.numPassedTests ?? 0, failed };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Runs a shell command, its output passed through, or kept (the last 64 KB) when quiet. */

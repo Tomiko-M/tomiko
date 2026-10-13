@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { type Command, commandHelp, type Io, parseArgs } from "./commands/common.js";
 import { diff } from "./commands/diff.js";
 import { doctor } from "./commands/doctor.js";
+import { matrix } from "./commands/matrix.js";
 import { prune } from "./commands/prune.js";
 import { record } from "./commands/record.js";
 import { ask, execute } from "./commands/run.js";
@@ -14,7 +15,7 @@ export type { Io } from "./commands/common.js";
 declare const __VERSION__: string | undefined;
 const VERSION = typeof __VERSION__ === "string" ? __VERSION__ : "dev";
 
-const COMMANDS: Command[] = [view, diff, record, doctor, scan, prune];
+const COMMANDS: Command[] = [view, diff, record, matrix, doctor, scan, prune];
 
 function help(p: Paint): string {
   const usage = COMMANDS.map((c) => c.usage[0]!.replace(/ \[options\]| \[-- test command\]/g, ""));

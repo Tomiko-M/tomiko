@@ -13,7 +13,7 @@ import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js"
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
-import { chosenForRecording, logUsage } from "./control.js";
+import { chosenForRecording, logUsage, modelOverride, shadowed } from "./control.js";
 import { type Misbehavior, MISBEHAVIORS, misbehave } from "./misbehave.js";
 import { JUDGE_HEADER } from "./judge.js";
 import { realFetch } from "./runtime.js";
@@ -56,6 +56,36 @@ export function resolveMode(option?: Mode): Mode {
     throw new TomikoError(`Unknown mode "${mode}". Expected one of: ${MODES.join(", ")}.`);
   }
   return mode;
+}
+
+/** The API a model belongs to, by its name, when it is one tomiko knows. */
+function apiOf(model: string): string | undefined {
+  if (/^claude/i.test(model)) return "anthropic";
+  if (/^(gpt|o\d|chatgpt)/i.test(model)) return "openai";
+  if (/^gemini/i.test(model)) return "google";
+  return undefined;
+}
+
+/** The same request, asking `model`: in the body's `model` field, or in Gemini's path. */
+async function withModel(request: Request, model: string): Promise<Request> {
+  const provider = detectProvider(request.url, request.headers);
+  const wanted = apiOf(model);
+  if (wanted && provider && ["anthropic", "openai", "google"].includes(provider) && wanted !== provider) {
+    throw new TomikoError(`TOMIKO_MODEL=${model} is a model of another API: this request goes to the ${provider} API.`);
+  }
+  const url = request.url.replace(/(\/models\/)[^/:?#]+(:)/, `$1${encodeURIComponent(model)}$2`);
+  let body: string | undefined = request.body ? await request.clone().text() : undefined;
+  try {
+    const parsed: unknown = body ? JSON.parse(body) : undefined;
+    if (parsed !== null && typeof parsed === "object" && typeof (parsed as { model?: unknown }).model === "string") {
+      body = JSON.stringify({ ...(parsed as object), model });
+    }
+  } catch {
+    // Not JSON: sent as it was.
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return new Request(url, { method: request.method, headers, body, signal: request.signal });
 }
 
 /** Faults that answer for the API, without reaching it. */
@@ -172,9 +202,10 @@ export class Cassette {
   }
 
   static async open(name: string, options: TomikoOptions = {}): Promise<Cassette> {
-    const file = cassettePath(options.dir ?? "__cassettes__", name);
+    const own = cassettePath(options.dir ?? "__cassettes__", name);
+    const file = shadowed(own);
     // `tomiko record` picks cassettes to re-record through the environment.
-    const mode = chosenForRecording(file) ? "record" : resolveMode(options.mode);
+    const mode = chosenForRecording(own) ? "record" : resolveMode(options.mode);
     const existing = mode === "record" ? undefined : await loadCassette(file);
     const cassette = new Cassette(name, file, mode, existing?.interactions ?? [], options);
     cassette.missing = mode === "replay" && !existing;
@@ -232,6 +263,9 @@ export class Cassette {
       request = new Request(request, { headers });
     }
     if (!judging && this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
+    // `tomiko matrix` sends the code's requests to another model; the judge keeps its own.
+    const model = judging ? undefined : modelOverride();
+    if (model) request = await withModel(request, model);
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {

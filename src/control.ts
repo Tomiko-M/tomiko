@@ -4,7 +4,7 @@
  * reports what it served.
  */
 import { appendFileSync, readFileSync } from "node:fs";
-import { delimiter, resolve, sep } from "node:path";
+import { delimiter, join, relative, resolve, sep } from "node:path";
 
 /** What a cassette served in a run, one JSON line per cassette closed. */
 export interface UsageEntry {
@@ -30,6 +30,24 @@ export interface UsageEntry {
 export const RECORD_ENV = "TOMIKO_RECORD";
 /** `TOMIKO_LOG`: a file each cassette appends its `UsageEntry` to when it closes. */
 export const LOG_ENV = "TOMIKO_LOG";
+/** `TOMIKO_MODEL`: the model every request is sent to instead of its own, for `tomiko matrix`. */
+export const MODEL_ENV = "TOMIKO_MODEL";
+/**
+ * `TOMIKO_SHADOW`: a directory cassettes are read from and written to instead of their own place,
+ * at the same path relative to the working directory, so a trial run leaves the real ones alone.
+ */
+export const SHADOW_ENV = "TOMIKO_SHADOW";
+
+/** Where a cassette lives in this run: its own place, or its place in `TOMIKO_SHADOW`. */
+export function shadowed(file: string, env: NodeJS.ProcessEnv = process.env): string {
+  const shadow = env[SHADOW_ENV];
+  if (!shadow) return file;
+  // A cassette outside the working directory keeps its path, without the way up.
+  const inside = relative(process.cwd(), file).split(sep).map((part) => (part === ".." ? "_" : part));
+  return join(resolve(shadow), ...inside);
+}
+
+export const modelOverride = (env: NodeJS.ProcessEnv = process.env) => env[MODEL_ENV] || undefined;
 
 let cached: { value: string; paths: string[] } | undefined;
 
