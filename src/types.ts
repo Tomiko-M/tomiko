@@ -1,4 +1,5 @@
 import type { Fault, FaultName } from "./faults.js";
+import type { JudgeOptions } from "./judge.js";
 
 /**
  * - `auto`    replay when a recording matches, otherwise hit the network and record (default locally)
@@ -38,6 +39,8 @@ export interface Usage {
 }
 
 export interface InteractionMeta {
+  /** A judge's request, made by `judge()` or `toMeet()`, not by the code under test. */
+  judge?: boolean;
   provider?: string;
   model?: string;
   usage?: Usage;
@@ -108,6 +111,8 @@ export interface TomikoOptions {
    * guard off.
    */
   secrets?: SecretAction | SecretsOptions | false;
+  /** The model `toMeet()` and `judge()` ask. Default: `claude-haiku-5-5`. */
+  judge?: JudgeOptions;
 }
 
 /**

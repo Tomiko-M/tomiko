@@ -26,6 +26,7 @@ export type { DiffEntry } from "./match.js";
 export { matchers, type RequestCount, type TomikoMatchers } from "./matchers.js";
 export { defaultPricing, costOf, priceFor } from "./pricing.js";
 export { formatSummary, printSummary, reports, resetReports, summary, type FormatOptions, type Summary } from "./report.js";
+export { judge, type JudgeOptions, type Verdict } from "./judge.js";
 export { findSecrets, SecretsFoundError } from "./secrets.js";
 export type { Piece } from "./words.js";
 export type * from "./types.js";

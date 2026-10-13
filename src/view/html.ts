@@ -49,6 +49,7 @@ h1 { font-size: 18px; margin: 0 0 4px; overflow-wrap: anywhere; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--panel); border: 1px solid var(--border); white-space: nowrap; }
 .badge.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .badge.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.badge.judge { background: var(--tool-soft); color: var(--tool); border-color: transparent; }
 .spacer { flex: 1; }
 .facts { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .body { padding: 12px 14px; display: grid; gap: 10px; }
@@ -153,6 +154,7 @@ function renderInteraction(i, previousIndex) {
   return h("section", { class: "card", id: "r" + i.index },
     h("div", { class: "card-head" },
       h("span", { class: "num" }, "#" + i.index),
+      i.judge && h("span", { class: "badge judge" }, "judge"),
       i.model && h("span", { class: "badge mono" }, i.model),
       h("span", { class: "badge " + (ok ? "ok" : "bad") }, String(i.status)),
       i.response.streamed && h("span", { class: "badge" }, "stream"),

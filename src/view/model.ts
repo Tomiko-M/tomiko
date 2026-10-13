@@ -27,6 +27,8 @@ export interface ToolView {
 
 export interface InteractionView {
   index: number;
+  /** A judge's request, not one the code under test made. */
+  judge: boolean;
   method: string;
   url: string;
   status: number;
@@ -232,6 +234,7 @@ function interactionView(interaction: Interaction, index: number, previous: Requ
   const fresh = earlier + (repeatsPreviousResponse ? 1 : 0);
   const view: InteractionView = {
     index,
+    judge: meta.judge === true,
     method: request.method,
     url: request.url,
     status: response.status,

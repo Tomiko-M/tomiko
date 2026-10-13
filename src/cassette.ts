@@ -14,6 +14,8 @@ import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
 import { chosenForRecording, logUsage } from "./control.js";
+import { type Misbehavior, MISBEHAVIORS, misbehave } from "./misbehave.js";
+import { JUDGE_HEADER } from "./judge.js";
 import { realFetch } from "./runtime.js";
 import {
   type Found,
@@ -33,6 +35,7 @@ import type {
   PricingTable,
   RecordedCall,
   RecordedRequest,
+  RecordedResponse,
   TomikoOptions,
   ToolCall,
 } from "./types.js";
@@ -54,6 +57,9 @@ export function resolveMode(option?: Mode): Mode {
   }
   return mode;
 }
+
+/** Faults that answer for the API, without reaching it. */
+const FAILURES = new Set<FaultName>(["rate_limit", "overloaded", "server_error", "network_error"]);
 
 /** Response headers that describe the wire encoding, which no longer applies once the body is buffered. */
 const WIRE_HEADERS = ["content-encoding", "content-length", "transfer-encoding"];
@@ -78,6 +84,8 @@ interface ServedEntry {
   interaction: Interaction;
   replayed: boolean;
   fault?: FaultName;
+  /** What the caller got, when a fault rewrote the recorded answer. */
+  response?: RecordedResponse;
 }
 
 interface Served {
@@ -184,8 +192,11 @@ export class Cassette {
    * is still being recorded contributes everything the caller has read from it.
    */
   get calls(): RecordedCall[] {
-    return this.served.map(({ interaction, replayed, fault }) => {
-      const { request, response } = interaction;
+    // The judge's requests are not what the code under test did.
+    return this.served.filter((entry) => !entry.interaction.meta.judge).map(({ interaction, replayed, fault, response: rewritten }) => {
+      const { request } = interaction;
+      // Assertions see what the caller saw.
+      const response = rewritten ?? interaction.response;
       const { model: responseModel, usage } = extractUsage(response.body);
       const model = responseModel ?? requestModel(request);
       const price = model && usage ? priceFor(model, this.pricing) : undefined;
@@ -212,8 +223,15 @@ export class Cassette {
 
   private async handle(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
-    const request = new Request(input, init);
-    if (this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
+    let request = new Request(input, init);
+    // A judge's request is told apart by a header, which never reaches the API.
+    const judging = request.headers.has(JUDGE_HEADER);
+    if (judging) {
+      const headers = new Headers(request.headers);
+      headers.delete(JUDGE_HEADER);
+      request = new Request(request, { headers });
+    }
+    if (!judging && this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {
@@ -222,23 +240,35 @@ export class Cassette {
       body: parseRequestBody(bodyText, request.headers.get("content-type")),
     };
 
-    const faults = this.faultPlan.next(recordedRequest);
+    // Faults are for the code under test; the judge always gets a straight answer.
+    const faults = judging ? [] : this.faultPlan.next(recordedRequest);
     const latency = faults.reduce((ms, f) => ms + (f.name === "latency" ? f.ms : 0), 0);
     if (latency > 0) await delay(latency, request.signal);
-    const failure = faults.find((f) => f.name !== "latency" && f.name !== "cut_stream");
+    const failure = faults.find((f) => FAILURES.has(f.name));
     if (failure) return this.fail(failure, request, recordedRequest);
+    const misbehavior = faults.find((f): f is Misbehavior => MISBEHAVIORS.has(f.name));
 
     if (this.missing) {
       this.failure = "missing";
       throw new CassetteNotFoundError(this.file);
     }
-    const { response, entry } = await this.serve(request, recordedRequest);
+    const served = await this.serve(request, recordedRequest);
+    const { entry } = served;
+    if (judging) entry.interaction.meta.judge = true;
+    let response = served.response;
+    if (misbehavior) {
+      // Reading the real answer to the end also finishes recording it, as it was.
+      await response.arrayBuffer();
+      entry.fault = misbehavior.name;
+      entry.response = misbehave(misbehavior, entry.interaction.response, recordedRequest);
+      response = buildResponse(entry.response, request.url);
+    }
     const cut = faults.find((f) => f.name === "cut_stream");
     if (cut?.name === "cut_stream") {
       entry.fault = "cut_stream";
       return cutResponse(response, cut.afterEvents);
     }
-    if (latency > 0) entry.fault = "latency";
+    if (latency > 0) entry.fault ??= "latency";
     return response;
   }
 
@@ -407,6 +437,7 @@ export class Cassette {
   private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {
     const { model, usage } = extractUsage(interaction.response.body);
     interaction.meta = {
+      ...(interaction.meta.judge ? { judge: true } : {}),
       provider: interaction.meta.provider,
       model: model ?? requestModel(interaction.request),
       usage,
