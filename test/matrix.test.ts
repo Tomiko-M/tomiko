@@ -162,7 +162,7 @@ describe("tomiko matrix", () => {
 
 describe("the model override", () => {
   it("rewrites the model in the body, or in Gemini's path", async () => {
-    const api = fakeApi((body, request) => json(request.url.includes("gemini") ? geminiResponse({ text: "hi" }) : openaiChat({ text: "hi" })));
+    const api = fakeApi((_body, request) => json(request.url.includes("gemini") ? geminiResponse({ text: "hi" }) : openaiChat({ text: "hi" })));
     await withEnv({ [MODEL_ENV]: "gpt-5-nano" }, () =>
       cassette("o", () => fetch(`${OPENAI_URL}/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "gpt-5.4", messages: [] }) }), { dir: tmpDir(), fetch: api }),
     );

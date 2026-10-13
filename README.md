@@ -16,7 +16,7 @@
 **The first run records real LLM responses. Every run after replays them.**<br>
 Agent tests that run offline in milliseconds, cost nothing, and give the same answer every time.
 
-[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Re-record](#see-what-the-model-does-differently) · [Secrets](#keep-keys-out-of-git) · [Reference](#reference)
+[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Re-record](#see-what-the-model-does-differently) · [Models](#try-a-cheaper-model) · [Costs](#find-where-you-overpay) · [Secrets](#keep-keys-out-of-git) · [Reference](#reference)
 
 </div>
 
@@ -69,8 +69,8 @@ behave as they did live.
 <td width="50%" valign="top">
 
 **Assertions about behavior**<br>
-Which tools the model called, with what arguments, in what order, how many requests it took, and
-what it cost.
+Which tools the model called, with what arguments, how many requests it took, what it cost, and
+whether the answer means what it should, judged by a model once and replayed after.
 
 </td>
 </tr>
@@ -78,8 +78,8 @@ what it cost.
 <td valign="top">
 
 **Failures on demand**<br>
-Replay with rate limits, overloads, dropped connections and slow responses to test your retry
-paths.
+Rate limits, overloads and dropped connections, and a model that calls a tool that doesn't exist,
+breaks its arguments, refuses, or stops at the token limit.
 
 </td>
 <td valign="top">
@@ -87,6 +87,22 @@ paths.
 **Diffs you can read**<br>
 Re-record and `tomiko diff` shows what the model now does differently: other tools, a cut-off
 answer, changed words, a new cost.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**The cheapest model that passes**<br>
+`tomiko matrix` runs your tests on other models side by side: which pass, what a run costs, what
+they do differently.
+
+</td>
+<td valign="top">
+
+**Money left on the table**<br>
+`tomiko doctor` reads your recordings for prompts that never hit the cache, unused tools and
+oversized tool results, and prices each one.
 
 </td>
 </tr>
@@ -137,6 +153,39 @@ Tool calls:
 | `toHaveUsedModel(model \| regex)` | a request went to the model |
 | `toCostLessThan(usd)` | the estimated cost is below `usd` |
 | `toHaveUsedFewerTokensThan(n)` | all tokens add up to fewer than `n` |
+| `toMeet(criteria)` | a judge model finds the text, or the cassette's last answer, meets `criteria`; see below |
+
+### Assert what it said
+
+Some answers can't be checked with `toContain`: that the agent apologizes, offers what the policy
+allows, stays polite. `toMeet` has a model judge it:
+
+```ts
+test("handles a late order", async () => {
+  await useCassette(async () => {
+    const answer = await agent.run("My order is two weeks late");
+
+    await expect(answer).toMeet("apologizes and offers a refund");
+  });
+});
+```
+
+The judge's question and verdict are recorded in the cassette with the rest, so the judge is asked
+once: every run after replays the verdict, offline, free and the same every time. When it fails,
+you see why:
+
+```
+expected the output to meet: "offers a full refund of the order"
+Judge (claude-haiku-5-5): It refunds only the delivery fee, not the order.
+Output: "We're sorry your order arrived late. We've refunded the delivery fee to your card."
+```
+
+Pass a cassette instead of a string to judge its last answer. The judge is `claude-haiku-5-5`
+unless you pick another with `toMeet(criteria, { model })` or `configure({ judge: { model } })`:
+any Anthropic, OpenAI or Gemini model, told apart by its name. Recording a verdict needs that
+provider's API key; replaying it needs none. The judge's requests are left out of what your agent
+did: they never count in tool calls, request counts or cost assertions. Outside a matcher,
+`await judge(output, criteria)` returns `{ pass, reason }`.
 
 ## Test the failure paths
 
@@ -152,7 +201,31 @@ await useCassette(run, { faults: [fault.cutStream({ afterEvents: 3 })] }); // co
 `rateLimit` · `overloaded` · `serverError` · `networkError` · `cutStream` · `latency`
 
 Errors use each provider's real format, so SDKs throw their usual typed errors, and tell SDKs to
-retry right away instead of waiting out a real backoff. Target requests with `on: [1, 3]`, `times: n` or `when: (request) => …`.
+retry right away instead of waiting out a real backoff. Target requests with `on: [1, 3]`,
+`times: n` or `when: (request) => …`.
+
+### When the model misbehaves
+
+The API answers fine, and the model gets it wrong. These faults take the model's answer, recorded
+or live, and rewrite it, so you can test what your agent does next. Pass them in `faults` like the
+ones above:
+
+```ts
+fault.hallucinatedTool()          // calls get_weather_v2, a tool that doesn't exist
+fault.brokenArguments({ on: 2 })  // the second answer's tool call has cut-off or missing arguments
+fault.refusal()                   // "I'm sorry, but I can't help with that."
+fault.maxTokens()                 // stops halfway, at the token limit
+fault.emptyAnswer()               // no text, no tool calls
+```
+
+The rewritten answer is in the provider's own format, streamed or not, with the stop reason to
+match: `max_tokens`, `length`, `incomplete` or `MAX_TOKENS` for a cut-off answer, and the
+provider's refusal signal where it has one. The cassette keeps what the model really said, and
+`c.calls[i].fault` names the fault that hit a call.
+
+A fault often sends your agent down a path the recording doesn't have: it tells the model the tool
+doesn't exist, or asks again. Run the test once in `auto` mode, with a key, and that path is
+recorded too; every run after replays it, on CI as well.
 
 ## See every run
 
@@ -233,6 +306,56 @@ It only trusts a run in which every test passed, and asks before removing anythi
 shows the list and stops. A skipped test doesn't use its cassette, so prune with the whole suite
 running.
 
+## Try a cheaper model
+
+Would a smaller model do? Run your tests on it and see:
+
+```sh
+npx tomiko matrix --models gpt-5.4-mini,gpt-4.1-mini,gpt-5-nano
+```
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/matrix-dark.png">
+  <img alt="tomiko matrix comparing gpt-5.4 with three cheaper models: how many tests each passes, what a run costs and how many times less, how long it takes, and in how many cassettes it behaves differently; gpt-5.4-mini passes every test at 3.3 times less" src="docs/matrix-light.png" width="100%">
+</picture>
+
+Each model runs your whole suite against the live API, with every request sent to it instead of
+the model in your code. Before spending anything, tomiko estimates the cost from your current
+recordings and asks. Then it lays the models side by side with what you use now: tests passed,
+the cost of a run, the time, and in how many cassettes the model behaves differently, compared the
+way [`tomiko diff`](#see-what-the-model-does-differently) compares them.
+
+Your cassettes are left as they are. `--keep` saves each model's to `.tomiko/matrix/<model>`, to
+look through with `tomiko view`; `--yes` and `--max-cost` work as in `tomiko record`. Try models
+of the API your code calls: OpenAI models for OpenAI requests. A test that asserts a model by name
+fails on any other, as it should, and `toMeet` verdicts are asked of the same judge as before.
+
+## Find where you overpay
+
+```sh
+npx tomiko doctor
+```
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/doctor-dark.png">
+  <img alt="tomiko doctor listing a system prompt with the current time in it that is never cached, a tool result of 11K tokens sent five times, a duplicate request, five tools never called, and a max_tokens far above what answers use, each with what it costs a run, and a total of $0.38 of $0.58 a run" src="docs/doctor-light.png" width="100%">
+</picture>
+
+It reads your cassettes, offline, for money spent on nothing, and puts a price on each finding:
+
+| Finding | Why it costs |
+| --- | --- |
+| **The system prompt changes between requests** | a timestamp or an id in it means the provider's prompt cache never hits; doctor shows the part that changes |
+| **Tools offered and never called** | every tool definition is paid for on every request |
+| **A huge tool result** | it goes back to the model on every later turn of the loop |
+| **The same request sent twice** | you pay again for an answer you already had |
+| **`max_tokens` far above what answers use** | not a cost today but a risk: what one runaway answer can cost |
+
+The amounts are at list prices, for the requests in your cassettes, so they are what a live run of
+your tests spends; your app spends the same on every conversation like them. Tokens that two
+findings share are counted once in the total. `--json` prints the findings for scripts, and
+`diagnose(cassettes)` returns them from code.
+
 ## Keep keys out of git
 
 Cassettes get committed, so a key that ends up in one gets published. Keys find their way in more
@@ -286,6 +409,22 @@ It exits with 1 when it finds any, so it can guard CI or a pre-commit hook.
 
 Each row is covered by tests that record against a fake API, replay offline, and require identical
 results.
+
+## Commands
+
+| | |
+| --- | --- |
+| `npx tomiko view` | open your cassettes as conversations, in one HTML file |
+| `npx tomiko record` | re-record, with the cost up front and a diff after |
+| `npx tomiko diff` | what the model does differently since the last commit |
+| `npx tomiko matrix --models a,b` | run your tests on other models, side by side |
+| `npx tomiko doctor` | find where your LLM calls cost more than they need to |
+| `npx tomiko scan` | find API keys and other secrets in cassettes |
+| `npx tomiko prune` | remove cassettes and requests your tests no longer use |
+
+Each takes paths of cassettes or directories, and `--help` lists its options. `record`, `matrix`
+and `prune` run your tests with Vitest or Jest, whichever the project has, or `npm test`; give
+your own command after `--`.
 
 ## Reference
 
@@ -426,6 +565,7 @@ Leave volatile fields out of matching with `ignore: ["metadata.user_id", "messag
 | `intercept` | every request | `(request) => boolean`; others go straight to the network |
 | `redact` | none | `(interaction) => interaction`, applied before saving |
 | `secrets` | `"fail"` | what to do with a secret in a recording: `"fail"`, `"redact"`, `"warn"`, or `false`; see secrets |
+| `judge` | `{ model: "claude-haiku-5-5" }` | the model `toMeet()` and `judge()` ask |
 | `pricing` | Anthropic, OpenAI and Gemini list prices | USD per million tokens, merged over the built-in table |
 | `fetch` | `globalThis.fetch` | what recording uses to reach the network |
 
@@ -505,6 +645,27 @@ OpenAI and Gemini models are built in, as of October 2026, at their base context
 snapshot such as `gpt-5-2025-08-07` or `claude-haiku-4-5-20251001` has its model's price. Add or
 correct others with `pricing: { "my-model": { input: 2, output: 8, cacheRead: 0.2 } }`. A model
 with no price is reported, never counted as free, and `toCostLessThan` fails on it.
+
+</details>
+
+<details>
+<summary><b>Environment variables</b></summary>
+
+<br>
+
+| Variable | |
+| --- | --- |
+| `TOMIKO_MODE` | `auto`, `replay` or `record` for this run; wins over options |
+| `CI` | when set, the default mode is `replay` |
+| `TOMIKO_RECORD` | cassette files or directories to re-record whatever the mode, separated like `PATH`, or `@file` naming a file with one per line |
+| `TOMIKO_MODEL` | send every request to this model instead of its own; the judge keeps its model |
+| `TOMIKO_SHADOW` | read and write cassettes in this directory instead, at the same paths relative to the working directory, so a trial run leaves yours alone |
+| `TOMIKO_LOG` | a file each cassette appends one JSON line to when it closes: what it replayed and recorded, and what had no match |
+| `NO_COLOR`, `FORCE_COLOR` | color in the commands and in `printSummary()` |
+
+The commands set the middle four for the test runs they start: `record` uses `TOMIKO_RECORD` and
+`TOMIKO_LOG`, `prune` uses `TOMIKO_LOG`, and `matrix` uses `TOMIKO_MODEL`, `TOMIKO_SHADOW` and
+`TOMIKO_LOG`. They work the same in a test run you start yourself.
 
 </details>
 
