@@ -20,6 +20,7 @@ export {
   type ToolsChange,
   type Totals,
 } from "./compare.js";
+export { diagnose, type Diagnosis, type DoctorOptions, type Finding, type FindingKind } from "./doctor.js";
 export { CassetteNotFoundError, NestedCassetteError, RequestMismatchError, TomikoError } from "./errors.js";
 export { fault, type Fault, type FaultName, type FaultRequest, type FaultTarget } from "./faults.js";
 export type { DiffEntry } from "./match.js";

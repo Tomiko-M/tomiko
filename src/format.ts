@@ -7,6 +7,14 @@ export const tokens = (n: number) =>
 
 export const usd = (n: number) => (n > 0 && n < 0.0001 ? "<$0.0001" : `$${n < 1 ? n.toFixed(4) : n.toFixed(2)}`);
 
+/** Money as people read it: `$1.24`, `$0.36`, `$0.0082`, `<$0.0001`. */
+export function money(n: number): string {
+  if (n === 0) return "$0";
+  if (n < 0.0001) return "<$0.0001";
+  if (n >= 0.01) return `$${n.toFixed(2)}`;
+  return `$${n.toPrecision(2).replace(/0+$/, "")}`;
+}
+
 export const duration = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)}m` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 
 /** `+17%`, `−8%`; undefined when there is nothing to compare against or no change. */
