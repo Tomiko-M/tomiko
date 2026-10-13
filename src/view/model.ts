@@ -2,7 +2,7 @@ import { readContent, stopReason } from "../inspect.js";
 import { canonical } from "../match.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
 import type { CassetteFile, Interaction, PricingTable, RecordedBody, ToolCall, Usage } from "../types.js";
-import { addUsage, detectProvider, emptyUsage, extractUsage } from "../usage.js";
+import { addUsage, detectProvider, emptyUsage, extractUsage, requestModel } from "../usage.js";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -145,6 +145,19 @@ function responsesItem(item: unknown): MessageView {
   return { role: "?", parts: [{ kind: "other", label: String(item.type ?? "item"), value: item }] };
 }
 
+/** Gemini `parts`: text, function calls and their results, inline files. */
+function geminiParts(parts: unknown): PartView[] {
+  return (Array.isArray(parts) ? parts.filter(isObj) : []).map((part): PartView => {
+    if (typeof part.text === "string") return { kind: "text", text: part.text };
+    if (isObj(part.functionCall)) return { kind: "tool_call", name: str(part.functionCall.name) ?? "?", input: part.functionCall.args, id: str(part.functionCall.id) };
+    if (isObj(part.functionResponse)) {
+      return { kind: "tool_result", content: flattenText(part.functionResponse.response), id: str(part.functionResponse.id) };
+    }
+    if (isObj(part.inlineData) || isObj(part.fileData)) return { kind: "image" };
+    return { kind: "other", label: Object.keys(part)[0] ?? "part", value: part };
+  });
+}
+
 interface RequestView {
   system?: string;
   rawMessages: unknown[];
@@ -162,6 +175,20 @@ function requestView(body: unknown): RequestView {
   if (Array.isArray(body.messages)) {
     const system = body.system === undefined ? undefined : flattenText(body.system);
     return { system, rawMessages: body.messages, messages: body.messages.filter(isObj).map(chatMessage), tools };
+  }
+  // Gemini: `contents` with `user` and `model` turns, the system prompt in `systemInstruction`.
+  if (Array.isArray(body.contents)) {
+    const instruction = body.systemInstruction ?? body.system_instruction;
+    const system = isObj(instruction) ? geminiParts(instruction.parts).map((p) => (p.kind === "text" ? p.text : "")).join("\n") : str(instruction);
+    const geminiTools = (Array.isArray(body.tools) ? body.tools.filter(isObj) : []).flatMap((t) => {
+      const declarations = t.functionDeclarations ?? t.function_declarations;
+      return (Array.isArray(declarations) ? declarations.filter(isObj) : []).map((d): ToolView => ({ name: str(d.name) ?? "?", description: str(d.description) }));
+    });
+    const messages = body.contents.filter(isObj).map((c): MessageView => ({
+      role: c.role === "model" ? "assistant" : (str(c.role) ?? "user"),
+      parts: geminiParts(c.parts),
+    }));
+    return { system, rawMessages: body.contents, messages, tools: geminiTools };
   }
   if (body.input !== undefined) {
     const items = Array.isArray(body.input) ? body.input : [body.input];
@@ -195,8 +222,7 @@ function interactionView(interaction: Interaction, index: number, previous: Requ
   const { request, response, meta } = interaction;
   const req = requestView(request.body);
   const { model: responseModel, usage } = extractUsage(response.body);
-  const requestModel = isObj(request.body) ? str(request.body.model) : undefined;
-  const model = responseModel ?? meta.model ?? requestModel;
+  const model = responseModel ?? meta.model ?? requestModel(request);
   const price = model && usage ? priceFor(model, pricing) : undefined;
   const earlier = previous ? sharedPrefix(previous.rawMessages, req.rawMessages) : 0;
   // An agent loop sends the whole history back: the previous request's messages, then the

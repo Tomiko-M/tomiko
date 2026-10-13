@@ -23,10 +23,22 @@ export interface ResponseContent {
 
 const ANTHROPIC_TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
 
-/** A complete (non-streamed) response body: Anthropic Messages, OpenAI Chat Completions or Responses. */
+/** Gemini candidates: text parts (thought summaries aside) and function calls. */
+function fromCandidates(candidates: unknown[], text: string[], toolCalls: ToolCall[]): void {
+  // Each candidate is an alternative answer; the first is the one clients use.
+  const content = candidates.filter(isObj)[0]?.content;
+  for (const part of isObj(content) && Array.isArray(content.parts) ? content.parts.filter(isObj) : []) {
+    if (typeof part.text === "string" && part.thought !== true) text.push(part.text);
+    const call = isObj(part.functionCall) ? part.functionCall : undefined;
+    if (call && typeof call.name === "string") toolCalls.push({ name: call.name, input: call.args ?? {}, id: str(call.id) });
+  }
+}
+
+/** A complete (non-streamed) response body: Anthropic Messages, OpenAI Chat Completions or Responses, Gemini. */
 function fromBody(o: Obj): ResponseContent {
   const text: string[] = [];
   const toolCalls: ToolCall[] = [];
+  if (Array.isArray(o.candidates)) fromCandidates(o.candidates, text, toolCalls);
 
   if (o.type === "message" && Array.isArray(o.content)) {
     for (const block of o.content.filter(isObj)) {
@@ -79,6 +91,7 @@ function fromEvents(events: unknown[]): ResponseContent {
   const text: string[] = [];
   const anthropicTools = new Map<number, PartialTool>();
   const chatTools = new Map<number, PartialTool>();
+  const geminiTools: ToolCall[] = [];
 
   for (const event of events.filter(isObj)) {
     // The Responses API ends with the full response object, which is the most reliable source.
@@ -100,6 +113,9 @@ function fromEvents(events: unknown[]): ResponseContent {
     }
 
     if (event.type === "response.output_text.delta" && typeof event.delta === "string") text.push(event.delta);
+
+    // Gemini streams whole responses, each carrying the next piece of text.
+    if (Array.isArray(event.candidates)) fromCandidates(event.candidates, text, geminiTools);
 
     if (Array.isArray(event.choices)) {
       for (const choice of event.choices.filter(isObj)) {
@@ -125,7 +141,7 @@ function fromEvents(events: unknown[]): ResponseContent {
       .filter(([, t]) => t.name)
       .map(([, t]) => ({ name: t.name, input: t.json ? parseArguments(t.json) : (t.input ?? {}), id: t.id }));
 
-  return { text: text.join(""), toolCalls: [...finish(anthropicTools), ...finish(chatTools)] };
+  return { text: text.join(""), toolCalls: [...finish(anthropicTools), ...finish(chatTools), ...geminiTools] };
 }
 
 export function readContent(body: RecordedBody): ResponseContent {
@@ -134,7 +150,7 @@ export function readContent(body: RecordedBody): ResponseContent {
   return { text: "", toolCalls: [] };
 }
 
-/** Why the model stopped: `end_turn`, `tool_use`, `max_tokens`, `stop`, `length`, `completed`… */
+/** Why the model stopped: `end_turn`, `tool_use`, `max_tokens`, `stop`, `length`, `completed`, `STOP`… */
 export function stopReason(body: RecordedBody): string | undefined {
   const fromObj = (o: unknown): string | undefined => {
     if (!isObj(o)) return undefined;
@@ -142,6 +158,10 @@ export function stopReason(body: RecordedBody): string | undefined {
     if (isObj(o.delta) && typeof o.delta.stop_reason === "string") return o.delta.stop_reason;
     if (Array.isArray(o.choices)) {
       const reason = o.choices.filter(isObj).map((c) => c.finish_reason).find((r) => typeof r === "string");
+      if (typeof reason === "string") return reason;
+    }
+    if (Array.isArray(o.candidates)) {
+      const reason = o.candidates.filter(isObj).map((c) => c.finishReason).find((r) => typeof r === "string");
       if (typeof reason === "string") return reason;
     }
     if (o.object === "response" && typeof o.status === "string") return o.status;

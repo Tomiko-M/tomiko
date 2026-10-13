@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { type Command, commandHelp, type Io, parseArgs } from "./commands/common.js";
 import { diff } from "./commands/diff.js";
+import { prune } from "./commands/prune.js";
+import { record } from "./commands/record.js";
+import { ask, execute } from "./commands/run.js";
 import { scan } from "./commands/scan.js";
 import { view } from "./commands/view.js";
 import { animationEnabled, colorEnabled, paint, type Paint } from "./terminal.js";
@@ -10,10 +13,10 @@ export type { Io } from "./commands/common.js";
 declare const __VERSION__: string | undefined;
 const VERSION = typeof __VERSION__ === "string" ? __VERSION__ : "dev";
 
-const COMMANDS: Command[] = [view, diff, scan];
+const COMMANDS: Command[] = [view, diff, record, scan, prune];
 
 function help(p: Paint): string {
-  const usage = COMMANDS.map((c) => c.usage[0]!.replace(/ \[options\]$/, ""));
+  const usage = COMMANDS.map((c) => c.usage[0]!.replace(/ \[options\]| \[-- test command\]/g, ""));
   const pad = Math.max(...usage.map((u) => u.length)) + 3;
   return [
     "",
@@ -59,6 +62,9 @@ const defaultIo = (): Io => ({
   animate: animationEnabled(process.stderr),
   columns: process.stdout.columns,
   env: process.env,
+  interactive: process.stdin.isTTY === true && process.stderr.isTTY === true,
+  confirm: ask,
+  exec: execute(process.cwd()),
 });
 
 export async function main(argv: string[], io: Io = defaultIo()): Promise<number> {
@@ -78,7 +84,8 @@ export async function main(argv: string[], io: Io = defaultIo()): Promise<number
     io.error(`  ${p.red("✖")} Unknown command: ${name}\n${help(p)}`);
     return 1;
   }
-  if (rest.includes("-h") || rest.includes("--help")) {
+  const own = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
+  if (own.includes("-h") || own.includes("--help")) {
     io.log(commandHelp(command, p));
     return 0;
   }
@@ -87,5 +94,6 @@ export async function main(argv: string[], io: Io = defaultIo()): Promise<number
     io.error(`  ${p.red("✖")} ${args}\n${commandHelp(command, p)}`);
     return 1;
   }
+  if (!command.runs) args.positional.push(...args.rest.splice(0));
   return command.run(args, io, p);
 }

@@ -16,7 +16,7 @@
 **The first run records real LLM responses. Every run after replays them.**<br>
 Agent tests that run offline in milliseconds, cost nothing, and give the same answer every time.
 
-[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Diff](#see-what-the-model-does-differently) · [Secrets](#keep-keys-out-of-git) · [Reference](#reference)
+[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Re-record](#see-what-the-model-does-differently) · [Secrets](#keep-keys-out-of-git) · [Reference](#reference)
 
 </div>
 
@@ -101,7 +101,8 @@ or the answer. Request headers are never stored.
 <td valign="top">
 
 **Works with your stack**<br>
-Anthropic, OpenAI, Vercel AI SDK, LangChain.js, plain `fetch`. Any test runner. No dependencies.
+Anthropic, OpenAI, Gemini, Vercel AI SDK, LangChain.js, plain `fetch`. Any test runner. No
+dependencies.
 
 </td>
 </tr>
@@ -170,12 +171,14 @@ tokens, cost and time of each step. One HTML file, no server, ready to attach to
 ## See what the model does differently
 
 Models change under you: a provider updates one, you switch to a newer one, a prompt gets
-rewritten. Re-record, then ask what changed:
+rewritten. Re-record, and see what changed:
 
 ```sh
-TOMIKO_MODE=record npx vitest run
-npx tomiko diff
+npx tomiko record
 ```
+
+It tells you what the re-recording will cost before spending anything, runs your tests against the
+live API, then shows how the answers differ from the last commit:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diff-dark.png">
@@ -192,10 +195,43 @@ Each changed cassette is labelled by its biggest change:
 | **same behavior, new wording** | the same tools and data, said differently; with how many words stayed the same |
 | **request changed, same answers** | you changed a prompt, a parameter or a tool, and the answers held |
 
-`--base main` compares with another revision, `--full` shows whole answers, `--json` prints the
-comparison for scripts, and `--exit-code` exits with 1 when anything changed. Without git,
-compare two files: `tomiko diff old.json new.json`. From code, `diffCassettes(path, before, after)`
-returns the same comparison.
+Re-record only part of it, and keep the bill in check:
+
+```sh
+npx tomiko record test/agent.test.ts    # the cassettes of one test file; the rest replay
+npx tomiko record --stale               # only cassettes that no longer match their tests
+npx tomiko record --yes --max-cost 0.50 # no questions, but never above $0.50 (for CI)
+npx tomiko record -- npm run test:llm   # your own test command
+```
+
+`--stale` replays your tests first, offline, and re-records just the cassettes that a changed
+prompt or a new test left behind.
+
+To compare without re-recording, `npx tomiko diff` compares the cassettes in your work tree with
+the last commit. `--base main` compares with another revision, `--full` shows whole answers,
+`--json` prints the comparison for scripts, and `--exit-code` exits with 1 when anything changed.
+Without git, compare two files: `tomiko diff old.json new.json`. From code,
+`diffCassettes(path, before, after)` returns the same comparison.
+
+### Prune what your tests no longer use
+
+Tests get renamed and deleted, prompts change, agents take fewer steps, and their old recordings
+stay behind. `npx tomiko prune` replays your tests, offline and for free, and removes the cassettes
+no test opened and the requests no test asked for:
+
+```
+  ✔ Replayed your tests: they use 12 of 14 cassettes.
+
+    − test/__cassettes__/agent.test.ts/old-name.json      no test used it
+    − test/__cassettes__/legacy.test.ts/greets.json       its test file is gone
+    ~ test/__cassettes__/agent.test.ts/plans-a-trip.json  2 of 5 requests unused: #4, #5
+
+  Remove 2 cassettes and 2 requests? [y/N]
+```
+
+It only trusts a run in which every test passed, and asks before removing anything; `--dry-run`
+shows the list and stops. A skipped test doesn't use its cassette, so prune with the whole suite
+running.
 
 ## Keep keys out of git
 
@@ -239,7 +275,8 @@ It exits with 1 when it finds any, so it can guard CI or a pre-commit hook.
 | --- | --- | --- |
 | **Anthropic SDK** | messages, streaming, tools, errors and retries | none ¹ |
 | **OpenAI SDK** | Chat Completions, Responses, streaming, tools, retries | none ¹ |
-| **Vercel AI SDK** | `generateText` tool loops, `streamText` | none |
+| **Google Gen AI SDK** | `generateContent` with function calls, streaming, errors | none |
+| **Vercel AI SDK** | `generateText` tool loops (Anthropic, OpenAI, Google), `streamText` | none |
 | **LangChain.js** | `ChatAnthropic`, `ChatOpenAI`, bound tools | none ² |
 | **Anything on `fetch`** | | none |
 
@@ -269,6 +306,10 @@ wins over both:
 ```sh
 TOMIKO_MODE=record npm test   # refresh every cassette
 ```
+
+`npx tomiko record` does the same with a cost estimate first and a diff after. To pick cassettes
+yourself, list them (files or directories) in `TOMIKO_RECORD`, separated like `PATH`: those are
+re-recorded whatever the mode.
 
 Identical requests are answered in the order they were recorded. A missing cassette only fails a
 test that actually sends a request.
@@ -385,7 +426,7 @@ Leave volatile fields out of matching with `ignore: ["metadata.user_id", "messag
 | `intercept` | every request | `(request) => boolean`; others go straight to the network |
 | `redact` | none | `(interaction) => interaction`, applied before saving |
 | `secrets` | `"fail"` | what to do with a secret in a recording: `"fail"`, `"redact"`, `"warn"`, or `false`; see secrets |
-| `pricing` | Anthropic list prices | USD per million tokens, merged over the built-in table |
+| `pricing` | Anthropic, OpenAI and Gemini list prices | USD per million tokens, merged over the built-in table |
 | `fetch` | `globalThis.fetch` | what recording uses to reach the network |
 
 Pass them per cassette, or set defaults once with `configure()`.
@@ -458,9 +499,12 @@ cost  · $0.0960 est. · $0.0800 saved by replay
 
 `formatSummary()` returns the same text as a string, plain unless you pass `{ color: true }`.
 
-Usage is read from Anthropic and OpenAI responses, streamed or not. Anthropic prices are built in;
-add others with `pricing: { "my-model": { input: 2, output: 8 } }`. A model with no price is
-reported, never counted as free, and `toCostLessThan` fails on it.
+Usage is read from Anthropic, OpenAI and Gemini responses, streamed or not, with cached and
+thinking tokens counted the way each provider bills them. List prices for current Anthropic,
+OpenAI and Gemini models are built in, as of October 2026, at their base context tier. A dated
+snapshot such as `gpt-5-2025-08-07` or `claude-haiku-4-5-20251001` has its model's price. Add or
+correct others with `pricing: { "my-model": { input: 2, output: 8, cacheRead: 0.2 } }`. A model
+with no price is reported, never counted as free, and `toCostLessThan` fails on it.
 
 </details>
 

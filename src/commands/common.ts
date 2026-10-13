@@ -16,6 +16,18 @@ export interface Io {
   /** The terminal's width, for wrapping long lines. */
   columns?: number;
   env?: NodeJS.ProcessEnv;
+  /** Someone is at the terminal to answer a question. */
+  interactive?: boolean;
+  /** Asks a yes/no question; true for yes. */
+  confirm?(question: string): Promise<boolean>;
+  /** Runs a shell command with extra environment variables, showing its output unless `quiet`. */
+  exec?(command: string, env: Record<string, string>, options: { quiet: boolean }): Promise<ExecResult>;
+}
+
+export interface ExecResult {
+  code: number;
+  /** The end of the output of a quiet run. */
+  output: string;
 }
 
 export type FlagSpec = Record<string, { type: "boolean" | "string" | "list"; short?: string; value?: string; help: string }>;
@@ -23,16 +35,18 @@ export type FlagSpec = Record<string, { type: "boolean" | "string" | "list"; sho
 export interface Parsed {
   positional: string[];
   flags: Record<string, boolean | string | string[] | undefined>;
+  /** Everything after `--`. */
+  rest: string[];
 }
 
 /** `--flag`, `--flag value`, `--flag=value`, `-f value`; `--` ends the options. */
 export function parseArgs(args: string[], spec: FlagSpec): Parsed | string {
-  const parsed: Parsed = { positional: [], flags: {} };
+  const parsed: Parsed = { positional: [], flags: {}, rest: [] };
   const byShort = new Map(Object.entries(spec).flatMap(([name, s]) => (s.short ? [[s.short, name] as const] : [])));
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === "--") {
-      parsed.positional.push(...args.slice(i + 1));
+      parsed.rest = args.slice(i + 1);
       break;
     }
     if (!arg.startsWith("-") || arg === "-") {
@@ -64,6 +78,8 @@ export interface Command {
   /** Paragraphs for the command's own help. */
   description: (p: Paint) => string[];
   flags: FlagSpec;
+  /** What follows `--` is a command to run, not more paths. */
+  runs?: boolean;
   run(args: Parsed, io: Io, p: Paint): Promise<number>;
 }
 

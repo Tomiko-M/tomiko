@@ -206,7 +206,7 @@ function sideLines(ctx: Ctx, side: Side, style: (t: string) => string): string[]
   return lines;
 }
 
-const CUT_OFF = new Set(["max_tokens", "length", "incomplete", "model_context_window_exceeded"]);
+const CUT_OFF = new Set(["max_tokens", "length", "incomplete", "model_context_window_exceeded", "MAX_TOKENS"]);
 
 function requestLines(ctx: Ctx, r: RequestDiff, explained: boolean): string[] {
   const { p } = ctx;
@@ -369,7 +369,7 @@ interface Pair {
   after?: CassetteFile;
 }
 
-interface Source {
+export interface Source {
   /** `HEAD (2456a7f) → working tree` */
   from: string;
   to: string;
@@ -379,7 +379,8 @@ interface Source {
 
 const DEFAULT_PATHSPEC = ":(glob)**/__cassettes__/**/*.json";
 
-async function fromGit(io: Io, paths: string[], ref: string): Promise<Source | string> {
+/** Cassettes under `paths` (default: every `__cassettes__` directory) that differ from `ref`. */
+export async function fromGit(io: Io, paths: string[], ref: string): Promise<Source | string> {
   const root = await repoRoot(io.cwd);
   if (!root) {
     return "tomiko diff compares cassettes with a git revision, and this is not a git repository (or git is not installed). Compare two files instead: tomiko diff old.json new.json";
@@ -416,11 +417,10 @@ export const diff: Command = {
   description: (p) => [
     "Shows how cassettes changed since a git revision, by what the model did: which tools",
     "it called and with what arguments, why it stopped, what it answered, and what that",
-    "cost. Ids, timestamps and other noise are ignored. To see how the model answers today,",
-    "re-record and compare:",
+    "cost. Ids, timestamps and other noise are ignored.",
     "",
-    `  ${p.accent("TOMIKO_MODE=record npx vitest run")}`,
-    `  ${p.accent("npx tomiko diff")}`,
+    `To see how the model answers today, re-record: ${p.accent("npx tomiko record")} shows this comparison`,
+    "when it is done.",
     "",
     "Without paths, compares every cassette in a __cassettes__ directory below this one.",
   ],
@@ -460,26 +460,40 @@ export const diff: Command = {
       return args.flags["exit-code"] && changed > 0 ? 1 : 0;
     }
 
-    const head = `  ${p.bold("tomiko diff")}  ${p.dim(source.from)} ${p.accent("→")} ${p.dim(source.to)}`;
-    if (cassettes.length === 0) {
-      io.log(`  ${p.green("✔")} No cassette changed since ${p.bold(source.from)}.`);
-      io.log(`    ${p.dim("Re-record them to see how the model answers today:")}`);
-      io.log(`    ${p.accent("TOMIKO_MODE=record npx vitest run")} ${p.dim("then")} ${p.accent("npx tomiko diff")}`);
-      return 0;
-    }
-    if (changed === 0) {
-      io.log(`  ${p.green("✔")} ${p.bold(plural(cassettes.length, "cassette"))} re-recorded, and the model behaves the same in all of them.`);
-      for (const line of totalsRows(p, summary)) io.log(`  ${line}`);
-      return 0;
-    }
-
-    const env = io.env ?? process.env;
-    const guard = secretGuard("warn", env);
-    io.log(head);
-    io.log("");
-    for (const line of renderDiff(cassettes, { color: p, full: args.flags.full === true, columns: io.columns, mask: (t) => maskSecrets(t, guard) })) {
-      io.log(line);
-    }
-    return args.flags["exit-code"] ? 1 : 0;
+    showComparison(io, p, source, cassettes, { full: args.flags.full === true });
+    return args.flags["exit-code"] && changed > 0 ? 1 : 0;
   },
 };
+
+/**
+ * Prints a comparison: what changed, or that nothing did. After `tomiko record` there is no point
+ * suggesting a re-recording.
+ */
+export function showComparison(
+  io: Io,
+  p: Paint,
+  source: Source,
+  cassettes: CassetteDiff[],
+  options: { full?: boolean; recorded?: boolean } = {},
+): void {
+  const summary = summarizeDiff(cassettes);
+  const changed = summary.changed + summary.added + summary.removed;
+  if (cassettes.length === 0) {
+    io.log(`  ${p.green("✔")} No cassette changed since ${p.bold(source.from)}.`);
+    if (!options.recorded) {
+      io.log(`    ${p.dim("Re-record them to see how the model answers today:")} ${p.accent("npx tomiko record")}`);
+    }
+    return;
+  }
+  if (changed === 0) {
+    io.log(`  ${p.green("✔")} ${p.bold(plural(cassettes.length, "cassette"))} re-recorded, and the model behaves the same in all of them.`);
+    for (const line of totalsRows(p, summary)) io.log(`  ${line}`);
+    return;
+  }
+  const guard = secretGuard("warn", io.env ?? process.env);
+  io.log(`  ${p.bold("tomiko diff")}  ${p.dim(source.from)} ${p.accent("→")} ${p.dim(source.to)}`);
+  io.log("");
+  for (const line of renderDiff(cassettes, { color: p, full: options.full, columns: io.columns, mask: (t) => maskSecrets(t, guard) })) {
+    io.log(line);
+  }
+}

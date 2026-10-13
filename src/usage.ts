@@ -17,6 +17,23 @@ export function addUsage(a: Usage, b: Usage): Usage {
 }
 
 /**
+ * Gemini's `usageMetadata`: thinking tokens are billed as output, cached tokens are part of the
+ * prompt count, and tokens of tool results the API fetched itself are input.
+ */
+function normalizeGemini(u: Obj): Usage | undefined {
+  const prompt = num(u.promptTokenCount);
+  const candidates = num(u.candidatesTokenCount);
+  if (prompt === undefined && candidates === undefined) return undefined;
+  const cached = num(u.cachedContentTokenCount) ?? 0;
+  return {
+    inputTokens: Math.max(0, (prompt ?? 0) - cached) + (num(u.toolUsePromptTokenCount) ?? 0),
+    outputTokens: (candidates ?? 0) + (num(u.thoughtsTokenCount) ?? 0),
+    cacheReadTokens: cached,
+    cacheWriteTokens: 0,
+  };
+}
+
+/**
  * Normalizes a provider `usage` object. Anthropic reports uncached `input_tokens` plus separate
  * cache counters; OpenAI's `prompt_tokens` / `input_tokens` include cached tokens, so those are
  * subtracted to make `inputTokens` mean "uncached input" everywhere.
@@ -56,7 +73,10 @@ function fromPayload(payload: unknown): Extracted {
   let usage: Usage | undefined;
   for (const o of nested) {
     if (model === undefined && typeof o.model === "string") model = o.model;
+    // Gemini names the model that answered `modelVersion` and its usage `usageMetadata`.
+    if (model === undefined && typeof o.modelVersion === "string") model = o.modelVersion;
     if (usage === undefined && isObj(o.usage)) usage = normalize(o.usage);
+    if (usage === undefined && isObj(o.usageMetadata)) usage = normalizeGemini(o.usageMetadata);
   }
   return { model, usage };
 }
@@ -99,6 +119,17 @@ export function extractUsage(body: RecordedBody): Extracted {
     usage = maxUsage(usage, found.usage);
   }
   return { model, usage };
+}
+
+/**
+ * The model a request asks for: the `model` field of the body, or for Gemini, which puts it in
+ * the path, `…/models/<model>:generateContent`.
+ */
+export function requestModel(request: { url: string; body?: unknown }): string | undefined {
+  const body = request.body;
+  if (isObj(body) && typeof body.model === "string") return body.model;
+  const match = /\/models\/([^/:?#]+):/.exec(request.url);
+  return match ? decodeURIComponent(match[1]!) : undefined;
 }
 
 /**

@@ -3,7 +3,9 @@
  * must produce the same result, with matchers and faults working on both runs.
  */
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
+import { ApiError, GoogleGenAI } from "@google/genai";
 import { ChatAnthropic } from "@langchain/anthropic";
 import { tool as langchainTool } from "@langchain/core/tools";
 import { ChatOpenAI } from "@langchain/openai";
@@ -18,6 +20,8 @@ import {
   anthropicStream,
   type FakeApi,
   fakeApi,
+  geminiResponse,
+  geminiStream,
   json,
   offline,
   openaiChat,
@@ -129,6 +133,7 @@ describe("openai SDK", () => {
 // request, so the cassette's patch reaches it anyway.
 const vercelAnthropic = createAnthropic({ apiKey: "k" });
 const vercelOpenAI = createOpenAI({ apiKey: "k" });
+const vercelGoogle = createGoogleGenerativeAI({ apiKey: "k" });
 
 describe("Vercel AI SDK", () => {
   it("generateText runs a multi-step tool loop (Anthropic provider)", async () => {
@@ -187,6 +192,26 @@ describe("Vercel AI SDK", () => {
     expect(replayed).toBe(live);
   });
 
+  it("generateText runs a tool loop (Google provider)", async () => {
+    const api = fakeApi((body) => {
+      const answered = JSON.stringify(body.contents).includes("functionResponse");
+      return json(answered ? geminiResponse({ text: "Sunny in Lisbon." }) : geminiResponse({ tools: [{ name: "get_weather", input: { city: "Lisbon" } }] }));
+    });
+    const { live, replayed } = await recordThenReplay(api, async (c) => {
+      const result = await generateText({
+        model: vercelGoogle("gemini-2.5-flash"),
+        prompt: "Weather in Lisbon?",
+        tools: { get_weather: tool({ inputSchema: z.object({ city: z.string() }), execute: async ({ city }) => `Sunny in ${city}` }) },
+        stopWhen: stepCountIs(3),
+      });
+      expect(c).toHaveCalledToolsInOrder(["get_weather"]);
+      expect(c).toHaveMadeRequests(2);
+      return result.text;
+    });
+    expect(live).toBe("Sunny in Lisbon.");
+    expect(replayed).toBe(live);
+  });
+
   it("generateText (OpenAI chat provider)", async () => {
     const api = fakeApi(() => json(openaiChat({ text: "chat model" })));
     const { replayed } = await recordThenReplay(api, async () => {
@@ -194,6 +219,54 @@ describe("Vercel AI SDK", () => {
       return result.text;
     });
     expect(replayed).toBe("chat model");
+  });
+});
+
+describe("Google Gen AI SDK", () => {
+  const weather = { name: "get_weather", parameters: { type: "OBJECT" as never, properties: { city: { type: "STRING" as never } } } };
+
+  it("generateContent with a function call, priced as Gemini", async () => {
+    const api = fakeApi(() => json(geminiResponse({ tools: [{ name: "get_weather", input: { city: "Lisbon" } }] })));
+    const { live, replayed } = await recordThenReplay(api, async (c) => {
+      const ai = new GoogleGenAI({ apiKey: "k" });
+      const res = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: "Weather in Lisbon?",
+        config: { tools: [{ functionDeclarations: [weather] }] },
+      });
+      expect(c).toHaveCalledTool("get_weather", { city: "Lisbon" });
+      expect(c).toHaveUsedModel("gemini-2.5-flash");
+      const call = c.calls[0]!;
+      // Thinking tokens are output; cached tokens come out of the prompt count.
+      expect(call.usage).toEqual({ inputTokens: 60, outputTokens: 50, cacheReadTokens: 40, cacheWriteTokens: 0 });
+      expect(call.cost).toBeCloseTo((60 * 0.3 + 50 * 2.5 + 40 * 0.03) / 1e6, 12);
+      return res.functionCalls;
+    });
+    expect(api.calls[0]!.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+    expect(replayed).toEqual(live);
+  });
+
+  it("generateContentStream", async () => {
+    const api = fakeApi(() => sse(geminiStream(["Olá", " do", " Gemini"]), 17));
+    const { live, replayed } = await recordThenReplay(api, async (c) => {
+      const ai = new GoogleGenAI({ apiKey: "k" });
+      const chunks: string[] = [];
+      for await (const chunk of await ai.models.generateContentStream({ model: "gemini-2.5-flash", contents: "Oi" })) chunks.push(chunk.text ?? "");
+      expect(c.calls[0]!.text).toBe("Olá do Gemini");
+      expect(c.calls[0]!.usage?.outputTokens).toBe(6);
+      return chunks.join("");
+    });
+    expect(live).toBe("Olá do Gemini");
+    expect(replayed).toBe(live);
+  });
+
+  it("simulated rate limits arrive as the SDK's API errors", async () => {
+    const dir = tmpDir();
+    const ask = () => new GoogleGenAI({ apiKey: "k" }).models.generateContent({ model: "gemini-2.5-flash", contents: "hi" });
+    await cassette("faults", ask, { dir, fetch: fakeApi(() => json(geminiResponse({ text: "hi" }))) });
+    const error = await cassette("faults", ask, { dir, mode: "replay", fetch: offline, faults: [fault.rateLimit()] }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(429);
   });
 });
 

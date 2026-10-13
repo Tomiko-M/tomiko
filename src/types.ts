@@ -66,7 +66,11 @@ export interface ModelPrice {
   cacheWrite?: number;
 }
 
-/** Keys are model ids; a key also matches any model id it is a prefix of (longest key wins). */
+/**
+ * Keys are model ids. A key also prices snapshots of its model: ids that add a date or version,
+ * `-latest`, `-preview` or `-exp` to it (`gpt-5-2025-08-07`, `gemini-3-pro-preview`). The longest
+ * matching key wins.
+ */
 export type PricingTable = Record<string, ModelPrice>;
 
 export interface TomikoOptions {

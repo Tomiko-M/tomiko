@@ -156,6 +156,24 @@ describe("diffCassettes", () => {
     expect(result.impact).toBe("behavior");
   });
 
+  it("reads Gemini requests, and a switch of Gemini model is a change, not a new request", () => {
+    const gemini = (model: string, text: string, prompt = "Hi"): Interaction => ({
+      request: {
+        method: "POST",
+        url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        body: { contents: [{ role: "user", parts: [{ text: prompt }] }], systemInstruction: { parts: [{ text: "Be brief." }] } },
+      },
+      response: { status: 200, headers: {}, body: { type: "json", value: { candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }], modelVersion: model } } },
+      meta: { recordedAt: "", durationMs: 1 },
+    });
+    const result = diffCassettes("g.json", file(gemini("gemini-2.5-flash", "Hello!")), file(gemini("gemini-3.1-pro", "Hello!", "Hi there")));
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.request!.model).toEqual({ before: "gemini-2.5-flash", after: "gemini-3.1-pro" });
+    expect(result.requests[0]!.request!.prompt?.after).toBe("Hi there");
+    expect(result.requests[0]!.request!.params).toEqual([]);
+    expect(result.impact).toBe("request");
+  });
+
   it("compares streamed answers by their content", () => {
     const streamed = (parts: string[]): Interaction => ({
       request: { method: "POST", url: ANTHROPIC_URL, body: { model: "claude-opus-5-5", stream: true, messages: [] } },

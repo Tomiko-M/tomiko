@@ -13,6 +13,7 @@ import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js"
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
+import { chosenForRecording, logUsage } from "./control.js";
 import { realFetch } from "./runtime.js";
 import {
   type Found,
@@ -35,7 +36,7 @@ import type {
   TomikoOptions,
   ToolCall,
 } from "./types.js";
-import { detectProvider, extractUsage } from "./usage.js";
+import { detectProvider, extractUsage, requestModel } from "./usage.js";
 
 const MODES: readonly Mode[] = ["auto", "replay", "record"];
 
@@ -68,10 +69,6 @@ function isTransient(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-function modelOf(body: unknown): unknown {
-  return body !== null && typeof body === "object" ? (body as { model?: unknown }).model : undefined;
-}
-
 function withUrl(response: Response, url: string): Response {
   Object.defineProperty(response, "url", { value: url });
   return response;
@@ -101,6 +98,13 @@ interface MatchKey {
   body: unknown;
   canonical: string;
 }
+
+/**
+ * Gemini returns function calls without ids, so clients make them up, differently on every run,
+ * and send them back with the results. They are left out of matching.
+ */
+const GEMINI_CALL_IDS = ["contents.*.parts.*.functionCall.id", "contents.*.parts.*.functionResponse.id"];
+const isGemini = (body: unknown) => body !== null && typeof body === "object" && Array.isArray((body as { contents?: unknown }).contents);
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -133,6 +137,10 @@ export class Cassette {
   private report: CassetteReport | undefined;
   /** The interactions came from a file, which may predate the secrets guard. */
   private loaded = false;
+  /** Interactions in the file when it was opened; later ones were recorded in this run. */
+  private size = 0;
+  /** Why a request found nothing to replay, for `tomiko record --stale`. */
+  private failure: "missing" | "mismatched" | undefined;
   /** Replay mode without a file only fails once a request needs it, so tests without LLM calls pass. */
   private missing = false;
 
@@ -156,12 +164,14 @@ export class Cassette {
   }
 
   static async open(name: string, options: TomikoOptions = {}): Promise<Cassette> {
-    const mode = resolveMode(options.mode);
     const file = cassettePath(options.dir ?? "__cassettes__", name);
+    // `tomiko record` picks cassettes to re-record through the environment.
+    const mode = chosenForRecording(file) ? "record" : resolveMode(options.mode);
     const existing = mode === "record" ? undefined : await loadCassette(file);
     const cassette = new Cassette(name, file, mode, existing?.interactions ?? [], options);
     cassette.missing = mode === "replay" && !existing;
     cassette.loaded = existing !== undefined;
+    cassette.size = existing?.interactions.length ?? 0;
     return cassette;
   }
 
@@ -177,8 +187,7 @@ export class Cassette {
     return this.served.map(({ interaction, replayed, fault }) => {
       const { request, response } = interaction;
       const { model: responseModel, usage } = extractUsage(response.body);
-      const requestModel = modelOf(request.body);
-      const model = responseModel ?? (typeof requestModel === "string" ? requestModel : undefined);
+      const model = responseModel ?? requestModel(request);
       const price = model && usage ? priceFor(model, this.pricing) : undefined;
       return {
         method: request.method,
@@ -219,7 +228,10 @@ export class Cassette {
     const failure = faults.find((f) => f.name !== "latency" && f.name !== "cut_stream");
     if (failure) return this.fail(failure, request, recordedRequest);
 
-    if (this.missing) throw new CassetteNotFoundError(this.file);
+    if (this.missing) {
+      this.failure = "missing";
+      throw new CassetteNotFoundError(this.file);
+    }
     const { response, entry } = await this.serve(request, recordedRequest);
     const cut = faults.find((f) => f.name === "cut_stream");
     if (cut?.name === "cut_stream") {
@@ -241,6 +253,7 @@ export class Cassette {
         return { response: buildResponse(found.match.response, request.url), entry };
       }
       if (this.mode === "replay") {
+        this.failure ??= "mismatched";
         throw new RequestMismatchError(
           recordedRequest.method,
           this.key(recordedRequest).url,
@@ -287,7 +300,7 @@ export class Cassette {
     let key = this.keys.get(request);
     if (!key) {
       const clean = this.guard ? withoutSecrets(request, this.guard) : request;
-      const body = stripPaths(clean.body, this.ignore);
+      const body = stripPaths(clean.body, isGemini(clean.body) ? [...this.ignore, ...GEMINI_CALL_IDS] : this.ignore);
       key = { url: clean.url, body, canonical: canonical(body) };
       this.keys.set(request, key);
     }
@@ -329,7 +342,7 @@ export class Cassette {
     }
     if (!nearest) return {};
     // A response from a different model is never an acceptable stand-in, however similar the prompt.
-    const sameModel = modelOf(nearest.request.body) === modelOf(req.body);
+    const sameModel = requestModel(nearest.request) === requestModel(req);
     if (this.fuzzy !== false && score >= this.fuzzy && sameModel) {
       this.used.add(nearest);
       const warning =
@@ -393,11 +406,9 @@ export class Cassette {
 
   private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {
     const { model, usage } = extractUsage(interaction.response.body);
-    const body = interaction.request.body as { model?: unknown } | undefined;
-    const requestModel = typeof body?.model === "string" ? body.model : undefined;
     interaction.meta = {
       provider: interaction.meta.provider,
-      model: model ?? requestModel,
+      model: model ?? requestModel(interaction.request),
       usage,
       recordedAt: interaction.meta.recordedAt,
       durationMs: endedAt - started,
@@ -465,6 +476,16 @@ export class Cassette {
       pricing: this.pricing,
     });
     recordReport(this.report);
+    logUsage({
+      file: this.file,
+      mode: this.mode,
+      exists: this.loaded,
+      size: this.size,
+      used: this.interactions.flatMap((interaction, i) => (i < this.size && this.used.has(interaction) ? [i] : [])),
+      recorded: this.report.recorded,
+      mismatched: this.failure === "mismatched",
+      missing: this.failure === "missing",
+    });
     if (refused) throw refused;
     return this.report;
   }

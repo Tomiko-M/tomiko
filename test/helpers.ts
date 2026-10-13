@@ -241,3 +241,45 @@ export const keys = {
   huggingface: "hf" + "_" + random(34, 19),
   groq: "gs" + "k_" + random(52, 23),
 };
+
+export const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+interface GeminiTurn {
+  text?: string;
+  tools?: FakeTool[];
+  model?: string;
+  finishReason?: string;
+}
+
+/** A Gemini generateContent response; usage counts thinking and cached tokens like the real API. */
+export function geminiResponse(turn: GeminiTurn) {
+  return {
+    candidates: [
+      {
+        content: {
+          role: "model",
+          parts: [
+            ...(turn.text !== undefined ? [{ text: turn.text }] : []),
+            ...(turn.tools ?? []).map((t) => ({ functionCall: { name: t.name, args: t.input } })),
+          ],
+        },
+        finishReason: turn.finishReason ?? "STOP",
+        index: 0,
+      },
+    ],
+    usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 30, cachedContentTokenCount: 40, totalTokenCount: 150 },
+    modelVersion: turn.model ?? "gemini-2.5-flash",
+    responseId: "resp-gemini-1",
+  };
+}
+
+/** streamGenerateContent?alt=sse events: each one a response with the next piece of text. */
+export function geminiStream(parts: string[], model = "gemini-2.5-flash") {
+  return parts.map((text, i) => ({
+    data: {
+      candidates: [{ content: { role: "model", parts: [{ text }] }, index: 0, ...(i === parts.length - 1 ? { finishReason: "STOP" } : {}) }],
+      usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 2 * (i + 1), totalTokenCount: 12 + 2 * (i + 1) },
+      modelVersion: model,
+    },
+  }));
+}

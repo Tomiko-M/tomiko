@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cassette, costOf, formatSummary, priceFor, defaultPricing, reports, summary } from "../src/index.js";
+import { requestModel } from "../src/usage.js";
 import { detectProvider, extractUsage } from "../src/usage.js";
 import { ANTHROPIC_URL, anthropicMessage, anthropicStream, fakeApi, json, sse, tmpDir } from "./helpers.js";
 
@@ -71,13 +72,34 @@ describe("detectProvider", () => {
   });
 });
 
+describe("requestModel", () => {
+  it("reads the body's model, or Gemini's from the path", () => {
+    expect(requestModel({ url: "https://api.openai.com/v1/responses", body: { model: "gpt-5" } })).toBe("gpt-5");
+    expect(requestModel({ url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" })).toBe("gemini-2.5-flash");
+    expect(requestModel({ url: "https://example.com/v1/chat", body: "text" })).toBeUndefined();
+  });
+});
+
 describe("pricing", () => {
-  it("prefers exact ids and falls back to the longest prefix", () => {
+  it("prefers exact ids and falls back to the model a snapshot belongs to", () => {
     expect(priceFor("claude-opus-5-5", defaultPricing)).toEqual({ input: 4, output: 20, cacheRead: 0.2 });
     expect(priceFor("claude-opus-5-20260101", defaultPricing)).toEqual({ input: 5, output: 25 });
     expect(priceFor("anthropic.claude-sonnet-5-5", defaultPricing)?.input).toBe(2);
+    expect(priceFor("us.anthropic.claude-sonnet-5-5-v1:0", defaultPricing)?.input).toBe(2);
     expect(priceFor("claude-haiku-4-5@20251001", defaultPricing)?.input).toBe(1);
+    expect(priceFor("gpt-5-2025-08-07", defaultPricing)?.input).toBe(1.25);
+    expect(priceFor("gpt-5-mini-2025-08-07", defaultPricing)?.input).toBe(0.25);
+    expect(priceFor("gpt-4o-2024-08-06", defaultPricing)?.input).toBe(2.5);
+    expect(priceFor("gemini-3-pro-preview", defaultPricing)?.input).toBe(2);
+    expect(priceFor("models/gemini-2.5-flash", defaultPricing)?.output).toBe(2.5);
+    expect(priceFor("gemini-2.5-flash-lite", defaultPricing)?.input).toBe(0.1);
     expect(priceFor("gpt-x", defaultPricing)).toBeUndefined();
+  });
+
+  it("gives a model of its own no price rather than a relative's", () => {
+    for (const model of ["gpt-5.6-sol", "gpt-5.4-pro", "o3-deep-research", "gemini-2.5-flash-image", "claude-opus-5-5x", "claude-sonnet-5-6"]) {
+      expect(priceFor(model, defaultPricing), model).toBeUndefined();
+    }
   });
 
   it("prices cache reads and writes with sensible defaults", () => {

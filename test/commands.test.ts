@@ -241,7 +241,7 @@ describe("help and arguments", () => {
     const diff = fakeIo(tmpDir());
     expect(await main(["diff", "--help"], diff.io)).toBe(0);
     expect(diff.out.join("\n")).toContain("--base <ref>");
-    expect(diff.out.join("\n")).toContain("TOMIKO_MODE=record npx vitest run");
+    expect(diff.out.join("\n")).toContain("npx tomiko record");
 
     const scan = fakeIo(tmpDir());
     expect(await main(["help", "scan"], scan.io)).toBe(0);
@@ -255,8 +255,9 @@ describe("help and arguments", () => {
       allow: { type: "list", help: "" },
     } as const;
     expect(parseArgs(["a", "-o", "x", "--allow", "1", "--allow=2", "--open", "--", "--b"], spec)).toEqual({
-      positional: ["a", "--b"],
+      positional: ["a"],
       flags: { out: "x", allow: ["1", "2"], open: true },
+      rest: ["--b"],
     });
     expect(parseArgs(["--out"], spec)).toBe("--out needs a value");
     expect(parseArgs(["--open=yes"], spec)).toBe("--open takes no value");

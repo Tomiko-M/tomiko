@@ -101,6 +101,9 @@ export class FaultPlan {
 const SIMULATED = "Simulated by tomiko";
 
 const anthropicError = (type: string, message: string) => ({ type: "error", error: { type, message: `${message} (${SIMULATED})` } });
+const googleError = (code: number, status: string, message: string) => ({
+  error: { code, message: `${message} (${SIMULATED})`, status },
+});
 const openaiError = (type: string, code: string | null, message: string) => ({
   error: { message: `${message} (${SIMULATED})`, type, param: null, code },
 });
@@ -114,6 +117,11 @@ export function errorResponse(
     if (name === "rate_limit") return { status: 429, body: anthropicError("rate_limit_error", "Rate limited") };
     if (name === "overloaded") return { status: 529, body: anthropicError("overloaded_error", "Overloaded") };
     return { status: 500, body: anthropicError("api_error", "Internal server error") };
+  }
+  if (provider === "google") {
+    if (name === "rate_limit") return { status: 429, body: googleError(429, "RESOURCE_EXHAUSTED", "Resource has been exhausted") };
+    if (name === "overloaded") return { status: 503, body: googleError(503, "UNAVAILABLE", "The model is overloaded") };
+    return { status: 500, body: googleError(500, "INTERNAL", "An internal error has occurred") };
   }
   if (name === "rate_limit") {
     return { status: 429, body: openaiError("requests", "rate_limit_exceeded", "Rate limit reached") };

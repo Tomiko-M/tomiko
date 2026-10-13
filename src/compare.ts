@@ -7,7 +7,7 @@ import { readContent, stopReason } from "./inspect.js";
 import { canonical, diff, type DiffEntry } from "./match.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import type { CassetteFile, Interaction, PricingTable, Usage } from "./types.js";
-import { addUsage, emptyUsage, extractUsage } from "./usage.js";
+import { addUsage, emptyUsage, extractUsage, requestModel } from "./usage.js";
 import { diffWords, type Piece } from "./words.js";
 
 type Obj = Record<string, unknown>;
@@ -168,7 +168,7 @@ interface RequestParts {
 }
 
 /** Keys that hold the conversation; everything else at the top level is a parameter. */
-const CONVERSATION = new Set(["model", "system", "messages", "tools", "input", "instructions"]);
+const CONVERSATION = new Set(["model", "system", "messages", "tools", "input", "instructions", "contents", "systemInstruction", "system_instruction"]);
 const TEXT_PARTS = new Set(["text", "input_text"]);
 
 function userTurn(content: unknown, parts: RequestParts): void {
@@ -179,14 +179,54 @@ function userTurn(content: unknown, parts: RequestParts): void {
   }
 }
 
+function withoutCallIds(node: unknown): unknown {
+  if (Array.isArray(node)) node.forEach(withoutCallIds);
+  else if (isObj(node)) {
+    for (const [key, value] of Object.entries(node)) {
+      if ((key === "functionCall" || key === "functionResponse") && isObj(value)) delete value.id;
+      withoutCallIds(value);
+    }
+  }
+  return node;
+}
+
+/** Gemini turns: text in `parts`, function results among them, the model's own turns as `model`. */
+function geminiTurns(body: Obj, parts: RequestParts): void {
+  const instruction = body.systemInstruction ?? body.system_instruction;
+  if (isObj(instruction)) parts.system.push(textOf(instruction.parts));
+  else if (typeof instruction === "string") parts.system.push(instruction);
+  for (const turn of Array.isArray(body.contents) ? body.contents.filter(isObj) : []) {
+    if (turn.role === "model") {
+      parts.history.push(turn);
+      continue;
+    }
+    for (const part of Array.isArray(turn.parts) ? turn.parts : []) {
+      if (isObj(part) && typeof part.text === "string") parts.prompt.push(part.text);
+      else parts.history.push(part);
+    }
+  }
+  // Ids clients make up for Gemini's function calls change with every recording.
+  parts.history = parts.history.map((item) => withoutCallIds(structuredClone(item)));
+  for (const tool of Array.isArray(body.tools) ? body.tools.filter(isObj) : []) {
+    const declarations = tool.functionDeclarations ?? tool.function_declarations;
+    for (const d of Array.isArray(declarations) ? declarations.filter(isObj) : []) parts.tools.set(str(d.name) ?? canonical(d), canonical(d));
+  }
+}
+
 /** Splits a request into what you wrote (system prompt, user turns, tools, parameters) and history. */
-function requestParts(body: unknown): RequestParts {
+function requestParts(request: { url: string; body?: unknown }): RequestParts {
+  const body = request.body;
   const parts: RequestParts = { system: [], prompt: [], history: [], tools: new Map(), params: {} };
+  parts.model = requestModel(request);
   if (!isObj(body)) {
     if (body !== undefined) parts.prompt.push(typeof body === "string" ? body : canonical(body));
     return parts;
   }
-  parts.model = str(body.model);
+  if (Array.isArray(body.contents)) {
+    geminiTurns(body, parts);
+    for (const [key, value] of Object.entries(body)) if (!CONVERSATION.has(key)) parts.params[key] = value;
+    return parts;
+  }
   if (body.system !== undefined) parts.system.push(textOf(body.system));
   if (typeof body.instructions === "string") parts.system.push(body.instructions);
 
@@ -312,7 +352,7 @@ export function sideOf(interaction: Interaction, pricing: PricingTable): Side {
   const { request, response, meta } = interaction;
   const content = readContent(response.body);
   const { model: responseModel, usage } = extractUsage(response.body);
-  const model = responseModel ?? meta.model ?? (isObj(request.body) ? str(request.body.model) : undefined);
+  const model = responseModel ?? meta.model ?? requestModel(request);
   const price = model && usage ? priceFor(model, pricing) : undefined;
   return {
     status: response.status,
@@ -326,11 +366,14 @@ export function sideOf(interaction: Interaction, pricing: PricingTable): Side {
   };
 }
 
-/** Requests are paired per endpoint in recording order: the third call to an API with the third. */
+/**
+ * Requests are paired per endpoint in recording order: the third call to an API with the third.
+ * Gemini's model is part of the path, so a switch of model is a change, not another endpoint.
+ */
 function endpoint(interaction: Interaction): string {
   try {
     const url = new URL(interaction.request.url);
-    return `${interaction.request.method} ${url.host}${url.pathname}`;
+    return `${interaction.request.method} ${url.host}${url.pathname.replace(/\/models\/[^/:]+:/, "/models/*:")}`;
   } catch {
     return `${interaction.request.method} ${interaction.request.url}`;
   }
@@ -383,7 +426,7 @@ export function diffCassettes(
     if (!now) return { ...base, status: "removed", impact: "behavior", before: sidesA[ia!] };
     const sideA = sidesA[ia!]!;
     const sideB = sidesB[ib!]!;
-    const request = compareRequests(requestParts(old.request.body), requestParts(now.request.body));
+    const request = compareRequests(requestParts(old.request), requestParts(now.request));
     const response = compareResponses(sideA, sideB);
     const impact = impactOf(request, response);
     return {
