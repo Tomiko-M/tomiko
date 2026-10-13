@@ -223,3 +223,63 @@ export function openaiResponseStream(parts: string[], model = "gpt-test") {
     event("response.completed", { response: done }),
   ];
 }
+
+/**
+ * Secrets that look real. They are built at run time so that no key-shaped literal appears in the
+ * source, where secret scanners (GitHub push protection among them) would rightly object.
+ */
+const ALPHABET = "Q7mZ2xK9pL4vB8nR1tY6wC3jH5dF0gSaEuIoPqWrTyUiOlKjHgFdSaZxCvBnM";
+export const random = (n: number, offset = 0) => Array.from({ length: n }, (_, i) => ALPHABET[(i * 7 + offset) % ALPHABET.length]).join("");
+export const keys = {
+  anthropic: ["sk", "ant", "api03", random(93) + "AA"].join("-"),
+  openai: ["sk", "proj", random(80, 3)].join("-"),
+  google: "AIza" + "Sy" + random(33, 5),
+  github: "gh" + "p_" + random(36, 11),
+  stripe: "sk_" + "live_" + random(24, 13),
+  slack: "xo" + "xb-" + "1234567890-" + random(24, 17),
+  aws: "AK" + "IA" + "Z7Q2X3N4M5P6R7S8",
+  huggingface: "hf" + "_" + random(34, 19),
+  groq: "gs" + "k_" + random(52, 23),
+};
+
+export const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+interface GeminiTurn {
+  text?: string;
+  tools?: FakeTool[];
+  model?: string;
+  finishReason?: string;
+}
+
+/** A Gemini generateContent response; usage counts thinking and cached tokens like the real API. */
+export function geminiResponse(turn: GeminiTurn) {
+  return {
+    candidates: [
+      {
+        content: {
+          role: "model",
+          parts: [
+            ...(turn.text !== undefined ? [{ text: turn.text }] : []),
+            ...(turn.tools ?? []).map((t) => ({ functionCall: { name: t.name, args: t.input } })),
+          ],
+        },
+        finishReason: turn.finishReason ?? "STOP",
+        index: 0,
+      },
+    ],
+    usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 30, cachedContentTokenCount: 40, totalTokenCount: 150 },
+    modelVersion: turn.model ?? "gemini-2.5-flash",
+    responseId: "resp-gemini-1",
+  };
+}
+
+/** streamGenerateContent?alt=sse events: each one a response with the next piece of text. */
+export function geminiStream(parts: string[], model = "gemini-2.5-flash") {
+  return parts.map((text, i) => ({
+    data: {
+      candidates: [{ content: { role: "model", parts: [{ text }] }, index: 0, ...(i === parts.length - 1 ? { finishReason: "STOP" } : {}) }],
+      usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 2 * (i + 1), totalTokenCount: 12 + 2 * (i + 1) },
+      modelVersion: model,
+    },
+  }));
+}

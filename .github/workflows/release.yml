@@ -23,6 +23,10 @@ on:
         description: Release notes in Markdown. Leave empty to generate them from merged pull requests.
         required: false
         default: ""
+      check_only:
+        description: Only check that npm accepts this workflow as a trusted publisher; publish nothing.
+        type: boolean
+        default: false
 
 # A release made in the UI also pushes its tag; runs queue up instead of publishing twice.
 concurrency:
@@ -34,7 +38,30 @@ permissions:
   id-token: write # lets npm verify this workflow and sign provenance
 
 jobs:
+  # What GitHub tells npm about this run, and what npm answers. Prints no token.
+  check:
+    if: inputs.check_only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask npm for a publish token
+        run: |
+          id_token="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" | jq -r .value)"
+          echo "GitHub presents this run as:"
+          python3 - "$id_token" <<'PY'
+          import base64, json, sys
+          payload = sys.argv[1].split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          keys = ["repository", "repository_owner", "workflow_ref", "job_workflow_ref", "event_name", "ref", "environment"]
+          print(json.dumps({k: claims.get(k) for k in keys}, indent=2))
+          PY
+          status="$(curl -sS -o answer.json -w '%{http_code}' -X POST -H "Authorization: Bearer $id_token" \
+            https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/tomiko)"
+          echo "npm answered HTTP $status:"
+          jq 'del(.token)' answer.json || cat answer.json
+
   publish:
+    if: ${{ !inputs.check_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

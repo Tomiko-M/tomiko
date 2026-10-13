@@ -249,7 +249,7 @@ describe("cli", () => {
   it("prints help and rejects unknown input", async () => {
     const { io, out, err } = fakeIo(tmpDir());
     expect(await main(["--help"], io)).toBe(0);
-    expect(out[0]).toContain("tomiko view [paths...]");
+    expect(out[0]).toContain("view [paths...]");
     expect(await main(["frobnicate"], io)).toBe(1);
     expect(await main(["view", "--bogus"], io)).toBe(1);
     expect(err.map((e) => e.split("\n")[0])).toEqual(["  ✖ Unknown command: frobnicate", "  ✖ Unknown option: --bogus"]);

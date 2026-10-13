@@ -27,6 +27,8 @@ export interface Paint {
   green(text: string): string;
   red(text: string): string;
   yellow(text: string): string;
+  cyan(text: string): string;
+  strike(text: string): string;
   link(text: string, url: string): string;
 }
 
@@ -35,7 +37,7 @@ const wrap = (open: string, close: string) => (text: string) => `\x1b[${open}m${
 export function paint(enabled: boolean, env: NodeJS.ProcessEnv = process.env): Paint {
   if (!enabled) {
     const plain = (text: string) => text;
-    return { enabled, bold: plain, dim: plain, accent: plain, green: plain, red: plain, yellow: plain, link: plain };
+    return { enabled, bold: plain, dim: plain, accent: plain, green: plain, red: plain, yellow: plain, cyan: plain, strike: plain, link: plain };
   }
   const truecolor = env.COLORTERM === "truecolor" || env.COLORTERM === "24bit";
   return {
@@ -47,6 +49,8 @@ export function paint(enabled: boolean, env: NodeJS.ProcessEnv = process.env): P
     green: wrap("32", "39"),
     red: wrap("31", "39"),
     yellow: wrap("33", "39"),
+    cyan: wrap("36", "39"),
+    strike: wrap("9", "29"),
     // OSC 8 hyperlinks: clickable in most modern terminals, invisible in the rest.
     link: (text, url) => `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`,
   };
@@ -109,4 +113,81 @@ export class Spinner {
   private readonly restoreCursor = () => {
     this.stream.write("\x1b[?25h");
   };
+}
+
+/** Columns a text takes in a terminal: wide East Asian characters and emoji take two. */
+export function width(text: string): number {
+  let n = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    if (code < 0x20 || (code >= 0x300 && code < 0x370) || code === 0x200b || code === 0xfe0f) continue;
+    const wide =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe30 && code <= 0xfe4f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f300 && code <= 0x1faff) ||
+      (code >= 0x20000 && code <= 0x3fffd);
+    n += wide ? 2 : 1;
+  }
+  return n;
+}
+
+/** A run of text drawn in one style. */
+export interface Span {
+  text: string;
+  style?: (text: string) => string;
+}
+
+/**
+ * Lays styled text out in lines of at most `columns` columns, breaking at spaces where it can.
+ * Styles are applied per line, so a wrapped span never bleeds its color into the margin.
+ */
+export function wrapSpans(spans: Span[], columns: number): string[] {
+  const max = Math.max(columns, 10);
+  const lines: Span[][] = [[]];
+  let used = 0;
+  /** The current line was started by wrapping rather than by a line break in the text. */
+  let wrapped = false;
+  const put = (text: string, style: Span["style"]) => {
+    const line = lines[lines.length - 1]!;
+    const last = line[line.length - 1];
+    if (last && last.style === style) last.text += text;
+    else line.push({ text, style });
+    used += width(text);
+  };
+  const newline = (soft = true) => {
+    lines.push([]);
+    used = 0;
+    wrapped = soft;
+  };
+  for (const span of spans) {
+    for (const part of span.text.split(/(\n)/)) {
+      if (part === "\n") {
+        newline(false);
+        continue;
+      }
+      for (const word of part.match(/\s+|\S+/g) ?? []) {
+        const space = /^\s/.test(word);
+        if (space && used === 0 && wrapped) continue; // no leading spaces on a wrapped line
+        if (used + width(word) <= max) {
+          put(word, span.style);
+        } else if (space) {
+          newline();
+        } else if (width(word) <= max) {
+          newline();
+          put(word, span.style);
+        } else {
+          for (const char of word) {
+            if (used + width(char) > max) newline();
+            put(char, span.style);
+          }
+        }
+      }
+    }
+  }
+  return lines.map((line) => line.map((s) => (s.style ? s.style(s.text) : s.text)).join("").trimEnd());
 }

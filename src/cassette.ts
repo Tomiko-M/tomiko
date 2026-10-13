@@ -13,7 +13,20 @@ import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js"
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import { buildReport, recordReport } from "./report.js";
+import { chosenForRecording, logUsage, modelOverride, shadowed } from "./control.js";
+import { type Misbehavior, MISBEHAVIORS, misbehave } from "./misbehave.js";
+import { JUDGE_HEADER } from "./judge.js";
 import { realFetch } from "./runtime.js";
+import {
+  type Found,
+  type Guard,
+  publicFindings,
+  redactInteractions,
+  scanInteractions,
+  SecretsFoundError,
+  secretGuard,
+  withoutSecrets,
+} from "./secrets.js";
 import { cassettePath, loadCassette, saveCassette } from "./store.js";
 import type {
   CassetteReport,
@@ -22,10 +35,11 @@ import type {
   PricingTable,
   RecordedCall,
   RecordedRequest,
+  RecordedResponse,
   TomikoOptions,
   ToolCall,
 } from "./types.js";
-import { detectProvider, extractUsage } from "./usage.js";
+import { detectProvider, extractUsage, requestModel } from "./usage.js";
 
 const MODES: readonly Mode[] = ["auto", "replay", "record"];
 
@@ -44,6 +58,39 @@ export function resolveMode(option?: Mode): Mode {
   return mode;
 }
 
+/** The API a model belongs to, by its name, when it is one tomiko knows. */
+function apiOf(model: string): string | undefined {
+  if (/^claude/i.test(model)) return "anthropic";
+  if (/^(gpt|o\d|chatgpt)/i.test(model)) return "openai";
+  if (/^gemini/i.test(model)) return "google";
+  return undefined;
+}
+
+/** The same request, asking `model`: in the body's `model` field, or in Gemini's path. */
+async function withModel(request: Request, model: string): Promise<Request> {
+  const provider = detectProvider(request.url, request.headers);
+  const wanted = apiOf(model);
+  if (wanted && provider && ["anthropic", "openai", "google"].includes(provider) && wanted !== provider) {
+    throw new TomikoError(`TOMIKO_MODEL=${model} is a model of another API: this request goes to the ${provider} API.`);
+  }
+  const url = request.url.replace(/(\/models\/)[^/:?#]+(:)/, `$1${encodeURIComponent(model)}$2`);
+  let body: string | undefined = request.body ? await request.clone().text() : undefined;
+  try {
+    const parsed: unknown = body ? JSON.parse(body) : undefined;
+    if (parsed !== null && typeof parsed === "object" && typeof (parsed as { model?: unknown }).model === "string") {
+      body = JSON.stringify({ ...(parsed as object), model });
+    }
+  } catch {
+    // Not JSON: sent as it was.
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return new Request(url, { method: request.method, headers, body, signal: request.signal });
+}
+
+/** Faults that answer for the API, without reaching it. */
+const FAILURES = new Set<FaultName>(["rate_limit", "overloaded", "server_error", "network_error"]);
+
 /** Response headers that describe the wire encoding, which no longer applies once the body is buffered. */
 const WIRE_HEADERS = ["content-encoding", "content-length", "transfer-encoding"];
 
@@ -58,10 +105,6 @@ function isTransient(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
-function modelOf(body: unknown): unknown {
-  return body !== null && typeof body === "object" ? (body as { model?: unknown }).model : undefined;
-}
-
 function withUrl(response: Response, url: string): Response {
   Object.defineProperty(response, "url", { value: url });
   return response;
@@ -71,6 +114,8 @@ interface ServedEntry {
   interaction: Interaction;
   replayed: boolean;
   fault?: FaultName;
+  /** What the caller got, when a fault rewrote the recorded answer. */
+  response?: RecordedResponse;
 }
 
 interface Served {
@@ -83,6 +128,30 @@ interface Lookup {
   warning?: string;
   nearest?: Interaction;
   score?: number;
+}
+
+/** A request as matching sees it: secrets replaced by placeholders and ignored paths removed. */
+interface MatchKey {
+  url: string;
+  body: unknown;
+  canonical: string;
+}
+
+/**
+ * Gemini returns function calls without ids, so clients make them up, differently on every run,
+ * and send them back with the results. They are left out of matching.
+ */
+const GEMINI_CALL_IDS = ["contents.*.parts.*.functionCall.id", "contents.*.parts.*.functionResponse.id"];
+const isGemini = (body: unknown) => body !== null && typeof body === "object" && Array.isArray((body as { contents?: unknown }).contents);
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** `Anthropic API key (#1 request body › messages[0].content)`, for one-line warnings. */
+function listFindings(found: Found[]): string {
+  const findings = publicFindings(found);
+  const shown = findings.slice(0, 3).map((f) => `${f.kind} (#${f.request} ${f.location})`);
+  if (findings.length > 3) shown.push(`${findings.length - 3} more`);
+  return shown.join(", ");
 }
 
 export class Cassette {
@@ -101,7 +170,15 @@ export class Cassette {
   private readonly ignore: string[];
   private readonly fuzzy: number | false;
   private readonly baseFetch: typeof globalThis.fetch;
+  private readonly guard: Guard | undefined;
+  private readonly keys = new WeakMap<RecordedRequest, MatchKey>();
   private report: CassetteReport | undefined;
+  /** The interactions came from a file, which may predate the secrets guard. */
+  private loaded = false;
+  /** Interactions in the file when it was opened; later ones were recorded in this run. */
+  private size = 0;
+  /** Why a request found nothing to replay, for `tomiko record --stale`. */
+  private failure: "missing" | "mismatched" | undefined;
   /** Replay mode without a file only fails once a request needs it, so tests without LLM calls pass. */
   private missing = false;
 
@@ -119,16 +196,21 @@ export class Cassette {
       throw new TomikoError(`\`fuzzy\` must be a number in (0, 1] or false, got ${this.fuzzy}`);
     }
     this.baseFetch = options.fetch ?? realFetch();
+    this.guard = secretGuard(options.secrets);
     this.faultPlan = new FaultPlan(options.faults ?? []);
     this.fetch = (input, init) => this.handle(input, init);
   }
 
   static async open(name: string, options: TomikoOptions = {}): Promise<Cassette> {
-    const mode = resolveMode(options.mode);
-    const file = cassettePath(options.dir ?? "__cassettes__", name);
+    const own = cassettePath(options.dir ?? "__cassettes__", name);
+    const file = shadowed(own);
+    // `tomiko record` picks cassettes to re-record through the environment.
+    const mode = chosenForRecording(own) ? "record" : resolveMode(options.mode);
     const existing = mode === "record" ? undefined : await loadCassette(file);
     const cassette = new Cassette(name, file, mode, existing?.interactions ?? [], options);
     cassette.missing = mode === "replay" && !existing;
+    cassette.loaded = existing !== undefined;
+    cassette.size = existing?.interactions.length ?? 0;
     return cassette;
   }
 
@@ -141,11 +223,13 @@ export class Cassette {
    * is still being recorded contributes everything the caller has read from it.
    */
   get calls(): RecordedCall[] {
-    return this.served.map(({ interaction, replayed, fault }) => {
-      const { request, response } = interaction;
+    // The judge's requests are not what the code under test did.
+    return this.served.filter((entry) => !entry.interaction.meta.judge).map(({ interaction, replayed, fault, response: rewritten }) => {
+      const { request } = interaction;
+      // Assertions see what the caller saw.
+      const response = rewritten ?? interaction.response;
       const { model: responseModel, usage } = extractUsage(response.body);
-      const requestModel = modelOf(request.body);
-      const model = responseModel ?? (typeof requestModel === "string" ? requestModel : undefined);
+      const model = responseModel ?? requestModel(request);
       const price = model && usage ? priceFor(model, this.pricing) : undefined;
       return {
         method: request.method,
@@ -170,8 +254,18 @@ export class Cassette {
 
   private async handle(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
-    const request = new Request(input, init);
-    if (this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
+    let request = new Request(input, init);
+    // A judge's request is told apart by a header, which never reaches the API.
+    const judging = request.headers.has(JUDGE_HEADER);
+    if (judging) {
+      const headers = new Headers(request.headers);
+      headers.delete(JUDGE_HEADER);
+      request = new Request(request, { headers });
+    }
+    if (!judging && this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
+    // `tomiko matrix` sends the code's requests to another model; the judge keeps its own.
+    const model = judging ? undefined : modelOverride();
+    if (model) request = await withModel(request, model);
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {
@@ -180,20 +274,35 @@ export class Cassette {
       body: parseRequestBody(bodyText, request.headers.get("content-type")),
     };
 
-    const faults = this.faultPlan.next(recordedRequest);
+    // Faults are for the code under test; the judge always gets a straight answer.
+    const faults = judging ? [] : this.faultPlan.next(recordedRequest);
     const latency = faults.reduce((ms, f) => ms + (f.name === "latency" ? f.ms : 0), 0);
     if (latency > 0) await delay(latency, request.signal);
-    const failure = faults.find((f) => f.name !== "latency" && f.name !== "cut_stream");
+    const failure = faults.find((f) => FAILURES.has(f.name));
     if (failure) return this.fail(failure, request, recordedRequest);
+    const misbehavior = faults.find((f): f is Misbehavior => MISBEHAVIORS.has(f.name));
 
-    if (this.missing) throw new CassetteNotFoundError(this.file);
-    const { response, entry } = await this.serve(request, recordedRequest);
+    if (this.missing) {
+      this.failure = "missing";
+      throw new CassetteNotFoundError(this.file);
+    }
+    const served = await this.serve(request, recordedRequest);
+    const { entry } = served;
+    if (judging) entry.interaction.meta.judge = true;
+    let response = served.response;
+    if (misbehavior) {
+      // Reading the real answer to the end also finishes recording it, as it was.
+      await response.arrayBuffer();
+      entry.fault = misbehavior.name;
+      entry.response = misbehave(misbehavior, entry.interaction.response, recordedRequest);
+      response = buildResponse(entry.response, request.url);
+    }
     const cut = faults.find((f) => f.name === "cut_stream");
     if (cut?.name === "cut_stream") {
       entry.fault = "cut_stream";
       return cutResponse(response, cut.afterEvents);
     }
-    if (latency > 0) entry.fault = "latency";
+    if (latency > 0) entry.fault ??= "latency";
     return response;
   }
 
@@ -208,9 +317,10 @@ export class Cassette {
         return { response: buildResponse(found.match.response, request.url), entry };
       }
       if (this.mode === "replay") {
+        this.failure ??= "mismatched";
         throw new RequestMismatchError(
           recordedRequest.method,
-          recordedRequest.url,
+          this.key(recordedRequest).url,
           this.name,
           found.nearest ? this.describeDiff(found.nearest, recordedRequest) : null,
           found.score ?? null,
@@ -246,12 +356,23 @@ export class Cassette {
     return buildResponse(interaction.response, request.url);
   }
 
-  private matchable(body: unknown): unknown {
-    return stripPaths(body, this.ignore);
+  /**
+   * Secrets are replaced before matching, so a cassette saved with `secrets: "redact"` still
+   * matches the live request, and no diff in an error message can print one.
+   */
+  private key(request: RecordedRequest): MatchKey {
+    let key = this.keys.get(request);
+    if (!key) {
+      const clean = this.guard ? withoutSecrets(request, this.guard) : request;
+      const body = stripPaths(clean.body, isGemini(clean.body) ? [...this.ignore, ...GEMINI_CALL_IDS] : this.ignore);
+      key = { url: clean.url, body, canonical: canonical(body) };
+      this.keys.set(request, key);
+    }
+    return key;
   }
 
   private describeDiff(recorded: Interaction, live: RecordedRequest): string {
-    return formatDiff(diff(this.matchable(recorded.request.body), this.matchable(live.body)));
+    return formatDiff(diff(this.key(recorded.request).body, this.key(live).body));
   }
 
   /**
@@ -260,9 +381,9 @@ export class Cassette {
    * for a fuzzy replay or for the mismatch error.
    */
   private lookup(req: RecordedRequest): Lookup {
-    const key = canonical(this.matchable(req.body));
-    const endpoint = this.interactions.filter((i) => i.request.method === req.method && i.request.url === req.url);
-    const exact = endpoint.filter((i) => canonical(this.matchable(i.request.body)) === key);
+    const live = this.key(req);
+    const endpoint = this.interactions.filter((i) => i.request.method === req.method && this.key(i.request).url === live.url);
+    const exact = endpoint.filter((i) => this.key(i.request).canonical === live.canonical);
     if (exact.length > 0) {
       const next = exact.find((i) => !this.used.has(i));
       if (next) {
@@ -277,7 +398,7 @@ export class Cassette {
     let nearest: Interaction | undefined;
     let score = -1;
     for (const candidate of unused.length > 0 ? unused : endpoint) {
-      const s = similarity(this.matchable(candidate.request.body), this.matchable(req.body));
+      const s = similarity(this.key(candidate.request).body, live.body);
       if (s > score) {
         score = s;
         nearest = candidate;
@@ -285,12 +406,12 @@ export class Cassette {
     }
     if (!nearest) return {};
     // A response from a different model is never an acceptable stand-in, however similar the prompt.
-    const sameModel = modelOf(nearest.request.body) === modelOf(req.body);
+    const sameModel = requestModel(nearest.request) === requestModel(req);
     if (this.fuzzy !== false && score >= this.fuzzy && sameModel) {
       this.used.add(nearest);
       const warning =
         `Fuzzy match (${Math.round(score * 100)}% similar) in cassette "${this.name}" ` +
-        `for ${req.method} ${req.url}:\n${this.describeDiff(nearest, req)}`;
+        `for ${req.method} ${live.url}:\n${this.describeDiff(nearest, req)}`;
       return { match: nearest, warning };
     }
     return { nearest, score };
@@ -349,11 +470,10 @@ export class Cassette {
 
   private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {
     const { model, usage } = extractUsage(interaction.response.body);
-    const body = interaction.request.body as { model?: unknown } | undefined;
-    const requestModel = typeof body?.model === "string" ? body.model : undefined;
     interaction.meta = {
+      ...(interaction.meta.judge ? { judge: true } : {}),
       provider: interaction.meta.provider,
-      model: model ?? requestModel,
+      model: model ?? requestModel(interaction.request),
       usage,
       recordedAt: interaction.meta.recordedAt,
       durationMs: endedAt - started,
@@ -371,15 +491,44 @@ export class Cassette {
     );
   }
 
-  /** Waits for in-flight stream recordings, saves new recordings, and returns the run report. */
+  /**
+   * Waits for in-flight stream recordings, saves new recordings, and returns the run report.
+   * Throws `SecretsFoundError`, saving nothing, when the cassette would contain a secret.
+   */
   async close(): Promise<CassetteReport> {
     if (this.report) return this.report;
     await Promise.all(this.pending.map((settle) => settle()));
-    const saved = this.recorded.some((i) => this.interactions.includes(i));
+    let saved = this.recorded.some((i) => this.interactions.includes(i));
+    let refused: SecretsFoundError | undefined;
     if (saved) {
       const redact = this.options.redact;
-      const interactions = redact ? this.interactions.map((i) => redact(structuredClone(i))) : this.interactions;
-      await saveCassette(this.file, { version: 1, interactions });
+      let interactions = redact ? this.interactions.map((i) => redact(structuredClone(i))) : this.interactions;
+      const guarded = this.guard ? redactInteractions(interactions, this.guard) : undefined;
+      if (guarded && guarded.found.length > 0) {
+        const count = plural(publicFindings(guarded.found).length, "secret");
+        if (this.guard!.action === "fail") {
+          refused = new SecretsFoundError(this.name, this.file, publicFindings(guarded.found));
+          this.warnings.push(`Not saved: cassette "${this.name}" contains ${count}: ${listFindings(guarded.found)}.`);
+          saved = false;
+        } else if (this.guard!.action === "redact") {
+          interactions = guarded.interactions;
+          this.warnings.push(`Redacted ${count} in cassette "${this.name}": ${listFindings(guarded.found)}.`);
+        } else {
+          this.warnings.push(`Saved cassette "${this.name}" with ${count} in it: ${listFindings(guarded.found)}.`);
+        }
+      }
+      if (saved) await saveCassette(this.file, { version: 1, interactions });
+    } else if (this.guard && this.loaded) {
+      // Nothing to save, but a cassette recorded before the guard (or with it off) may hold secrets.
+      const found = scanInteractions(this.interactions, this.guard);
+      const count = publicFindings(found).length;
+      if (count > 0) {
+        const them = count === 1 ? "it" : "them";
+        this.warnings.push(
+          `Cassette "${this.name}" contains ${plural(count, "secret")}: ${listFindings(found)}. ` +
+            `Run \`npx tomiko scan --fix\` to replace ${them}, and revoke ${them} if the file was ever committed.`,
+        );
+      }
     }
     this.report = buildReport({
       name: this.name,
@@ -392,6 +541,17 @@ export class Cassette {
       pricing: this.pricing,
     });
     recordReport(this.report);
+    logUsage({
+      file: this.file,
+      mode: this.mode,
+      exists: this.loaded,
+      size: this.size,
+      used: this.interactions.flatMap((interaction, i) => (i < this.size && this.used.has(interaction) ? [i] : [])),
+      recorded: this.report.recorded,
+      mismatched: this.failure === "mismatched",
+      missing: this.failure === "missing",
+    });
+    if (refused) throw refused;
     return this.report;
   }
 }

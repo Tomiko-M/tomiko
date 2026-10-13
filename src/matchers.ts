@@ -1,4 +1,5 @@
 import { TomikoError } from "./errors.js";
+import { judge, type JudgeOptions, outputOf } from "./judge.js";
 import type { RecordedCall, ToolCall } from "./types.js";
 
 /** The parts of a Vitest/Jest matcher context these matchers use. */
@@ -42,6 +43,11 @@ export interface TomikoMatchers<R = unknown> {
   toCostLessThan(usd: number): R;
   /** All tokens processed (input, output, cache reads and writes) are fewer than `tokens`. */
   toHaveUsedFewerTokensThan(tokens: number): R;
+  /**
+   * A model judges that the received text (or a cassette's last answer) meets `criteria`, in
+   * words. Inside a cassette the verdict is recorded and replayed. Await it.
+   */
+  toMeet(criteria: string, options?: JudgeOptions): Promise<R>;
 }
 
 function inspectable(received: unknown, matcher: string): Inspectable {
@@ -86,7 +92,23 @@ function totalTokens(calls: RecordedCall[]): number {
   }, 0);
 }
 
+const clip = (text: string, max = 400) => (text.length > max ? `${text.slice(0, max)}…` : text);
+
 export const matchers = {
+  async toMeet(this: MatcherContext, received: unknown, criteria: string, options?: JudgeOptions): Promise<MatcherResult> {
+    const verdict = await judge(received, criteria, options);
+    const output = clip(outputOf(received));
+    return {
+      pass: verdict.pass,
+      message: () =>
+        [
+          `expected the output ${this.isNot ? "not " : ""}to meet: ${this.utils.printExpected(criteria)}`,
+          `Judge (${verdict.model}): ${verdict.reason || (verdict.pass ? "it does." : "it doesn't.")}`,
+          `Output: ${this.utils.printReceived(output)}`,
+        ].join("\n"),
+    };
+  },
+
   toHaveCalledTool(this: MatcherContext, received: unknown, name: string, input?: unknown): MatcherResult {
     const cassette = inspectable(received, "toHaveCalledTool");
     const tools = toolsOf(cassette);

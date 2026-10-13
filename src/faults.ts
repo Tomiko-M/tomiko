@@ -21,7 +21,18 @@ export interface FaultTarget {
   when?: (request: FaultRequest) => boolean;
 }
 
-export type FaultName = "rate_limit" | "overloaded" | "server_error" | "network_error" | "cut_stream" | "latency";
+export type FaultName =
+  | "rate_limit"
+  | "overloaded"
+  | "server_error"
+  | "network_error"
+  | "cut_stream"
+  | "latency"
+  | "hallucinated_tool"
+  | "broken_arguments"
+  | "refusal"
+  | "max_tokens"
+  | "empty_answer";
 
 export type Fault = FaultTarget &
   (
@@ -29,6 +40,11 @@ export type Fault = FaultTarget &
     | { name: "network_error"; message: string }
     | { name: "cut_stream"; afterEvents: number }
     | { name: "latency"; ms: number }
+    | { name: "hallucinated_tool"; tool?: string; input?: Record<string, unknown> }
+    | { name: "broken_arguments"; tool?: string; arguments?: string; input?: Record<string, unknown> }
+    | { name: "refusal"; message: string }
+    | { name: "max_tokens"; keep: number }
+    | { name: "empty_answer" }
   );
 
 /**
@@ -75,6 +91,40 @@ export const fault = {
   }),
   /** Delays the response by `ms`. Honors the request's abort signal, so client timeouts fire. */
   latency: (options: FaultTarget & { ms: number }): Fault => ({ ...options, name: "latency" }),
+
+  // The model misbehaving. The request is answered as usual (replayed, or sent and recorded), and
+  // the caller gets the answer rewritten, in the provider's format, streamed or not.
+
+  /**
+   * The model calls a tool that doesn't exist: by default the first tool offered, with `_v2`
+   * added to its name, as models do. Set `tool` and `input` to choose.
+   */
+  hallucinatedTool: (options: FaultTarget & { tool?: string; input?: Record<string, unknown> } = {}): Fault => ({
+    ...options,
+    name: "hallucinated_tool",
+  }),
+  /**
+   * The model calls a tool with arguments that don't fit it: JSON cut off in the middle where
+   * arguments are text (OpenAI), no arguments at all where they are an object (Anthropic,
+   * Gemini). `tool` picks the call; `arguments` or `input` set exactly what is sent.
+   */
+  brokenArguments: (options: FaultTarget & { tool?: string; arguments?: string; input?: Record<string, unknown> } = {}): Fault => ({
+    ...options,
+    name: "broken_arguments",
+  }),
+  /** The model declines to answer, with the provider's refusal signal where it has one. */
+  refusal: (options: FaultTarget & { message?: string } = {}): Fault => ({
+    message: "I'm sorry, but I can't help with that.",
+    ...options,
+    name: "refusal",
+  }),
+  /**
+   * The model stops at the token limit: the answer is cut, `keep` (default 0.5) of the way
+   * through, and the stop reason says so. An answer that was a tool call stops inside it.
+   */
+  maxTokens: (options: FaultTarget & { keep?: number } = {}): Fault => ({ keep: 0.5, ...options, name: "max_tokens" }),
+  /** The model answers with nothing: no text, no tool calls. */
+  emptyAnswer: (options: FaultTarget = {}): Fault => ({ ...options, name: "empty_answer" }),
 };
 
 /** Decides which faults hit which requests, keeping per-fault hit counts for `times`. */
@@ -101,6 +151,9 @@ export class FaultPlan {
 const SIMULATED = "Simulated by tomiko";
 
 const anthropicError = (type: string, message: string) => ({ type: "error", error: { type, message: `${message} (${SIMULATED})` } });
+const googleError = (code: number, status: string, message: string) => ({
+  error: { code, message: `${message} (${SIMULATED})`, status },
+});
 const openaiError = (type: string, code: string | null, message: string) => ({
   error: { message: `${message} (${SIMULATED})`, type, param: null, code },
 });
@@ -114,6 +167,11 @@ export function errorResponse(
     if (name === "rate_limit") return { status: 429, body: anthropicError("rate_limit_error", "Rate limited") };
     if (name === "overloaded") return { status: 529, body: anthropicError("overloaded_error", "Overloaded") };
     return { status: 500, body: anthropicError("api_error", "Internal server error") };
+  }
+  if (provider === "google") {
+    if (name === "rate_limit") return { status: 429, body: googleError(429, "RESOURCE_EXHAUSTED", "Resource has been exhausted") };
+    if (name === "overloaded") return { status: 503, body: googleError(503, "UNAVAILABLE", "The model is overloaded") };
+    return { status: 500, body: googleError(500, "INTERNAL", "An internal error has occurred") };
   }
   if (name === "rate_limit") {
     return { status: 429, body: openaiError("requests", "rate_limit_exceeded", "Rate limit reached") };
