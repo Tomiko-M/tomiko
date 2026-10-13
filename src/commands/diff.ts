@@ -14,7 +14,7 @@ import {
 import { change, duration, plural, tokens, usd } from "../format.js";
 import { changedFiles, GitError, readAt, repoRoot, resolveRevision } from "../git.js";
 import { canonical, type DiffEntry } from "../match.js";
-import { maskSecrets, secretGuard } from "../secrets.js";
+import { maskJson, maskSecrets, secretGuard } from "../secrets.js";
 import { paint, type Paint, type Span, Spinner, wrapSpans } from "../terminal.js";
 import type { CassetteFile, Usage } from "../types.js";
 import { diffWords, type Piece } from "../words.js";
@@ -24,16 +24,27 @@ export interface RenderOptions {
   /** Whole answers instead of the changed parts. */
   full?: boolean;
   columns?: number;
-  /** Hides secrets in what is shown. */
-  mask?: (text: string) => string;
+  /** Hides secrets in what is shown; `key` is the field a value belongs to. */
+  mask?: (text: string, key?: string) => string;
 }
 
 interface Ctx {
   p: Paint;
   full: boolean;
   columns: number;
-  mask: (text: string) => string;
+  mask: (text: string, key?: string) => string;
 }
+
+/** A JSON value with its strings masked, each knowing the field it is in. */
+function maskDeep(ctx: Ctx, v: unknown, key?: string): unknown {
+  if (typeof v === "string") return ctx.mask(v, key);
+  if (Array.isArray(v)) return v.map((item) => maskDeep(ctx, item, key));
+  if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, maskDeep(ctx, x, k)]));
+  return v;
+}
+
+/** `messages[2].content` → `content`, `tags[0]` → `tags`: the field a diff entry's value is in. */
+const fieldOf = (path: string) => path.split(".").pop()?.replace(/(?:\[\d+\])+$/, "") || undefined;
 
 /* ---------------------------------------- layout ------------------------------------------- */
 
@@ -132,8 +143,8 @@ function textLines(ctx: Ctx, label: string, change: TextChange, meter: boolean):
   return lines;
 }
 
-function value(ctx: Ctx, v: unknown): string {
-  const text = ctx.mask(typeof v === "string" ? JSON.stringify(v) : canonical(v));
+function value(ctx: Ctx, v: unknown, key?: string): string {
+  const text = typeof v === "string" ? JSON.stringify(ctx.mask(v, key)) : canonical(maskDeep(ctx, v, key));
   return ctx.full ? text : clip(text, 80);
 }
 
@@ -143,18 +154,19 @@ function entryLines(ctx: Ctx, label: string, entries: DiffEntry[], limit = 8, le
   const shown = ctx.full ? entries : entries.slice(0, limit);
   const lines = shown.flatMap((e, i) => {
     const name = e.path || "(value)";
+    const key = fieldOf(e.path);
     let spans: Span[];
-    if (e.kind === "added") spans = [{ text: "+ ", style: p.green }, { text: `${name}  ` }, { text: value(ctx, e.after), style: p.green }];
-    else if (e.kind === "removed") spans = [{ text: "− ", style: p.red }, { text: `${name}  ` }, { text: value(ctx, e.before), style: p.red }];
+    if (e.kind === "added") spans = [{ text: "+ ", style: p.green }, { text: `${name}  ` }, { text: value(ctx, e.after, key), style: p.green }];
+    else if (e.kind === "removed") spans = [{ text: "− ", style: p.red }, { text: `${name}  ` }, { text: value(ctx, e.before, key), style: p.red }];
     else if (typeof e.before === "string" && typeof e.after === "string" && Math.max(e.before.length, e.after.length) > 40) {
-      const { pieces } = diffWords(flat(ctx, e.before), flat(ctx, e.after));
+      const { pieces } = diffWords(flat(ctx, ctx.mask(e.before, key)), flat(ctx, ctx.mask(e.after, key)));
       spans = [{ text: `${name}  ` }, ...pieceSpans(ctx, ctx.full ? pieces : compact(pieces).pieces)];
     } else {
       spans = [
         { text: `${name}  ` },
-        { text: value(ctx, e.before), style: p.enabled ? (t) => p.red(p.strike(t)) : undefined },
+        { text: value(ctx, e.before, key), style: p.enabled ? (t) => p.red(p.strike(t)) : undefined },
         { text: " → ", style: p.dim },
-        { text: value(ctx, e.after), style: p.green },
+        { text: value(ctx, e.after, key), style: p.green },
       ];
     }
     return field(ctx, i === 0 ? label : "", [...lead, ...spans]);
@@ -179,12 +191,9 @@ function names(ctx: Ctx, list: string[], other: string[], style: (t: string) => 
 
 function requestHeader(ctx: Ctx, r: RequestDiff): string {
   const { p } = ctx;
-  let path = r.url;
-  try {
-    path = new URL(r.url).pathname;
-  } catch {
-    // Not a URL: shown as is.
-  }
+  // Masked whole, since some secrets are recognized by their host (a Slack webhook), then cut down
+  // to the path.
+  const path = ctx.mask(r.url).replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "").replace(/[?#].*$/, "") || "/";
   const modelBefore = r.before?.model;
   const modelAfter = r.after?.model;
   const model =
@@ -422,7 +431,8 @@ export const diff: Command = {
     `To see how the model answers today, re-record: ${p.accent("npx tomiko record")} shows this comparison`,
     "when it is done.",
     "",
-    "Without paths, compares every cassette in a __cassettes__ directory below this one.",
+    "Without paths, compares every cassette in a __cassettes__ directory below this one. Two",
+    "files are compared with each other, or each with git when --base is given.",
   ],
   flags: {
     base: { type: "string", value: "ref", help: "Compare with this git revision (default: HEAD)" },
@@ -434,7 +444,8 @@ export const diff: Command = {
     const json = args.flags.json === true;
     const ref = typeof args.flags.base === "string" ? args.flags.base : "HEAD";
     const paths = args.positional;
-    const pairwise = paths.length === 2 && (await isFile(io.cwd, paths[0]!)) && (await isFile(io.cwd, paths[1]!));
+    // Two files are compared with each other, unless --base asks for git.
+    const pairwise = args.flags.base === undefined && paths.length === 2 && (await isFile(io.cwd, paths[0]!)) && (await isFile(io.cwd, paths[1]!));
     const spinner = new Spinner(io.stream, p, io.animate && !json).start(pairwise ? "Comparing…" : `Comparing cassettes with ${ref}…`);
 
     let source: Source | string;
@@ -456,7 +467,9 @@ export const diff: Command = {
     const changed = summary.changed + summary.added + summary.removed;
 
     if (json) {
-      io.log(JSON.stringify({ base: source.base, summary, cassettes }, null, 2));
+      // Every string, masked: the earlier recording may predate the secrets guard.
+      const guard = secretGuard("warn", io.env ?? process.env);
+      io.log(JSON.stringify(maskJson({ base: source.base, summary, cassettes }, guard), null, 2));
       return args.flags["exit-code"] && changed > 0 ? 1 : 0;
     }
 
@@ -493,7 +506,7 @@ export function showComparison(
   const guard = secretGuard("warn", io.env ?? process.env);
   io.log(`  ${p.bold("tomiko diff")}  ${p.dim(source.from)} ${p.accent("→")} ${p.dim(source.to)}`);
   io.log("");
-  for (const line of renderDiff(cassettes, { color: p, full: options.full, columns: io.columns, mask: (t) => maskSecrets(t, guard) })) {
+  for (const line of renderDiff(cassettes, { color: p, full: options.full, columns: io.columns, mask: (t, key) => maskSecrets(t, guard, key) })) {
     io.log(line);
   }
 }

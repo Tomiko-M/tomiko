@@ -7,8 +7,9 @@ function git(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       "git",
-      // Paths come back unquoted, whatever script they are in.
-      ["-c", "core.quotepath=off", ...args],
+      // Paths come back unquoted, whatever script they are in, and relative to the root whatever
+      // the user's diff.relative says.
+      ["-c", "core.quotepath=off", "-c", "diff.relative=false", ...args],
       {
         cwd,
         encoding: "utf8",

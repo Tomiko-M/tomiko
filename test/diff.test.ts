@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { stripVTControlCharacters } from "node:util";
 import { renderDiff } from "../src/commands/diff.js";
 import { diffCassettes, summarizeDiff, type CassetteFile, type Interaction } from "../src/index.js";
+import { maskSecrets, secretGuard } from "../src/secrets.js";
 import { paint } from "../src/terminal.js";
 import { diffWords } from "../src/words.js";
 import { ANTHROPIC_URL, anthropicStream, OPENAI_URL, openaiChat } from "./helpers.js";
@@ -201,6 +202,51 @@ describe("diffCassettes", () => {
     expect(summary.before.requests).toBe(3);
     expect(summary.after.usage.outputTokens).toBe(300 + 100 + 100);
     expect(summary.after.cost).toBeGreaterThan(summary.before.cost!);
+  });
+});
+
+describe("what the review found", () => {
+  it("sees changed tool arguments that merely look like ids", () => {
+    const before = file(exchange(ask("CI"), { tools: [{ name: "run", input: { workflow: "ci-build-and-test", script: "run-unit-tests" } }] }));
+    const after = file(exchange(ask("CI"), { tools: [{ name: "run", input: { workflow: "ci-deploy-production", script: "run-db-migrations" } }] }));
+    const result = diffCassettes("ci.json", before, after);
+    expect(result.impact).toBe("behavior");
+    expect(result.requests[0]!.response!.tools!.inputs[0]!.changes.map((c) => c.path)).toEqual(["script", "workflow"]);
+  });
+
+  it("reads a JSON answer in a fence quickly, even an unclosed one", () => {
+    const started = performance.now();
+    const degenerate = "```json\n" + " ".repeat(80_000);
+    diffCassettes("x.json", file(exchange(ask("x"), { text: degenerate })), file(exchange(ask("x"), { text: degenerate + "!" })));
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it("knows a streamed Responses API answer that was cut short", () => {
+    const streamed = (status: string): Interaction => ({
+      request: { method: "POST", url: `${OPENAI_URL}/responses`, body: { model: "gpt-5", input: "Hi", stream: true } },
+      response: {
+        status: 200,
+        headers: {},
+        body: { type: "sse", chunks: [`event: response.${status}\ndata: ${JSON.stringify({ type: `response.${status}`, response: { status, output: [] } })}\n\n`] },
+      },
+      meta: { recordedAt: "", durationMs: 1 },
+    });
+    const result = diffCassettes("r.json", file(streamed("completed")), file(streamed("incomplete")));
+    expect(result.requests[0]!.response!.stopReason).toEqual({ before: "completed", after: "incomplete" });
+    expect(renderDiff([result]).join("\n")).toContain("completed → incomplete  cut off at the token limit");
+  });
+
+  it("masks secrets in values by the field they are in, and in paths", () => {
+    const key = "tvly-" + "Q7mZ2xK9pL4vB8nR1tY6wC3jH5dF0gSa";
+    const before = file(exchange(ask("search"), { tools: [{ name: "search", input: { api_key: key, q: "a" } }] }));
+    const after = file(exchange(ask("search"), { tools: [{ name: "search", input: { api_key: key.replace("Q7", "Z9"), q: "a" } }] }));
+    after.interactions[0]!.request.url = "https://hooks.slack.com/services/T0123ABCD/B0123ABCD/" + "Xq7Lm2Zp9Kd4Wv8Rt6Yb3Nc1";
+    before.interactions[0]!.request.url = after.interactions[0]!.request.url;
+    const guard = secretGuard("warn", {});
+    const text = renderDiff([diffCassettes("s.json", before, after)], { mask: (t, k) => maskSecrets(t, guard, k), columns: 120 }).join("\n");
+    expect(text).not.toContain(key.slice(5, 25));
+    expect(text).toContain("api_key");
+    expect(text).not.toContain("Xq7Lm2Zp9Kd4");
   });
 });
 

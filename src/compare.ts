@@ -133,15 +133,17 @@ export interface DiffOptions {
 
 /** Values each recording mints anew: message, tool call and response ids. */
 const GENERATED_ID = /^(?:msg|toolu|srvtoolu|mcptoolu|call|fc|resp|rs|ws|ci|ctc|chatcmpl|run|step|req)[_-][A-Za-z0-9_-]{6,}$/;
+/** Fields that hold such ids. A tool's own arguments (`"script": "run-unit-tests"`) are left alone. */
+const ID_KEY = /^(?:id|call_id|tool_use_id|tool_call_id|previous_response_id|item_id)$/;
 /** Thinking signatures and encrypted reasoning, sent back verbatim in later turns. */
 const OPAQUE = new Set(["signature", "encrypted_content"]);
 
-function stable(value: unknown): unknown {
-  if (typeof value === "string") return GENERATED_ID.test(value) ? "<id>" : value;
-  if (Array.isArray(value)) return value.map(stable);
+function stable(value: unknown, key?: string): unknown {
+  if (typeof value === "string") return key !== undefined && ID_KEY.test(key) && GENERATED_ID.test(value) ? "<id>" : value;
+  if (Array.isArray(value)) return value.map((item) => stable(item, key));
   if (isObj(value)) {
     const out: Obj = {};
-    for (const [k, v] of Object.entries(value)) out[k] = OPAQUE.has(k) && typeof v === "string" ? "<opaque>" : stable(v);
+    for (const [k, v] of Object.entries(value)) out[k] = OPAQUE.has(k) && typeof v === "string" ? "<opaque>" : stable(v, k);
     return out;
   }
   return value;
@@ -281,8 +283,14 @@ function compareRequests(a: RequestParts, b: RequestParts): RequestChanges | und
 
 /** The answer as data when it is JSON, also inside a Markdown code fence. */
 function asData(text: string): unknown {
-  const fenced = /^\s*```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n\s*```\s*$/.exec(text);
-  const body = (fenced ? fenced[1]! : text).trim();
+  // Found with indexOf: a regex over an unclosed fence followed by whitespace is quadratic.
+  let body = text.trim();
+  if (body.startsWith("```")) {
+    const open = body.indexOf("\n");
+    const close = body.lastIndexOf("```");
+    if (open === -1 || close <= open || !/^```(?:json)?[ \t]*\r?$/.test(body.slice(0, open))) return undefined;
+    body = body.slice(open + 1, close).trim();
+  }
   if (!/^[[{]/.test(body)) return undefined;
   try {
     return JSON.parse(body);

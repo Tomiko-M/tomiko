@@ -43,8 +43,23 @@ export function realFetch(): typeof globalThis.fetch {
   return globalThis.fetch === dispatch ? runtime.native : globalThis.fetch;
 }
 
+/**
+ * `secrets: "redact"` on one cassette keeps the values and formats `configure()` allowed: lists
+ * add up, the rest is overridden.
+ */
+function mergeSecrets(base: TomikoOptions["secrets"], extra: TomikoOptions["secrets"]): TomikoOptions["secrets"] {
+  if (extra === undefined) return base;
+  if (extra === false || base === undefined || base === false) return extra;
+  const a = typeof base === "string" ? { action: base } : base;
+  const b = typeof extra === "string" ? { action: extra } : extra;
+  return { ...a, ...b, allow: [...(a.allow ?? []), ...(b.allow ?? [])], patterns: [...(a.patterns ?? []), ...(b.patterns ?? [])] };
+}
+
 export function mergeOptions(base: TomikoOptions, extra: TomikoOptions = {}): TomikoOptions {
-  return { ...base, ...extra, pricing: { ...base.pricing, ...extra.pricing } };
+  const merged: TomikoOptions = { ...base, ...extra, pricing: { ...base.pricing, ...extra.pricing } };
+  const secrets = mergeSecrets(base.secrets, extra.secrets);
+  if (secrets !== undefined) merged.secrets = secrets;
+  return merged;
 }
 
 export function assertNoActiveCassette(name: string): void {

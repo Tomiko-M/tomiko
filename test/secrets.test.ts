@@ -51,7 +51,7 @@ describe("finding secrets", () => {
   it("finds values assigned to secret-named fields, in JSON and in text", () => {
     const g = guard();
     const leaks = scanInteractions(
-      [interaction({ messages: [{ role: "user", content: "hi" }], metadata: { api_key: "k3yV4lue99xyz" } }, "DB_PASSWORD=s3cretValue1 and {\"client_secret\":\"Abc123def456\"}")],
+      [interaction({ messages: [{ role: "user", content: "hi" }], metadata: { api_key: "k3yV4lue99xyz" } }, "DB_PASSWORD=s3cr3tV4lu3Q9 and {\"client_secret\":\"Xq7Lm2Zp9Kd4\"}")],
       g,
     ).map((f) => f.hit.kind);
     expect(leaks).toEqual(['Value of "api_key"', 'Value of "DB_PASSWORD"', 'Value of "client_secret"']);
@@ -138,6 +138,79 @@ describe("finding secrets", () => {
     ]);
     expect(JSON.stringify(findings)).not.toContain(keys.anthropic.slice(14, 30));
     expect(maskSecrets(`a ${keys.github} b`, guard())).toBe(`a ghp_…${keys.github.slice(-4)} b`);
+  });
+});
+
+describe("what the review found", () => {
+  const pem = (label: string, body: string) => `-----BEGIN ${label}-----\n${body.match(/.{1,64}/g)!.join("\n")}\n-----END ${label}-----`;
+  const keyBody = random(1600, 7) + "AB";
+
+  it("shows only the header of a private key, however its line breaks are written", () => {
+    const key = pem("RSA PRIVATE KEY", keyBody);
+    for (const written of [key, key.replace(/\n/g, "\\n"), key.replace(/\n/g, " ")]) {
+      const call = interaction(undefined, "");
+      call.response.body = { type: "json", value: { choices: [{ message: { tool_calls: [{ function: { name: "write_file", arguments: JSON.stringify({ content: written }) } }] } }] } };
+      const findings = findSecrets([call]);
+      expect(findings.map((f) => f.preview)).toEqual(["-----BEGIN RSA PRIVATE KEY-----…"]);
+      expect(JSON.stringify(findings)).not.toContain(keyBody.slice(100, 140));
+    }
+  });
+
+  it("finds OpenSSH and PGP keys, whose bodies look like placeholders to a naive check", () => {
+    const openssh = pem("OPENSSH PRIVATE KEY", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW" + random(300, 3));
+    expect(found(openssh)).toEqual(["Private key"]);
+    expect(found(pem("PGP PRIVATE KEY BLOCK", random(400, 5) + "xxxxfake" + random(100)))).toEqual(["Private key"]);
+  });
+
+  it("redacts a quoted secret to its closing quote, whatever it contains", () => {
+    const g = guard();
+    for (const [text, kept] of [
+      ['{"password": "Kx9vQ2mL&7pRz(4wT"}', '{"password": "[REDACTED:password]"}'],
+      ['DB_PASSWORD="Tr0ub4dor;horse,Battery9"', 'DB_PASSWORD="[REDACTED:db-password]"'],
+      ["SECRET_KEY='ab12cd34[ef56]gh78Q'", "SECRET_KEY='[REDACTED:secret-key]'"],
+      ['client_secret: "9f8e7d6c{5b4a}3210zyx"', 'client_secret: "[REDACTED:client-secret]"'],
+    ]) {
+      const { interactions } = redactInteractions([interaction(undefined, text!)], g);
+      expect(JSON.stringify(interactions[0]!.response.body)).toContain(JSON.stringify(kept).slice(1, -1));
+    }
+  });
+
+  it("leaves code and demo values alone", () => {
+    for (const code of [
+      "private_key: Ed25519PrivateKey = load()",
+      "const token: OAuth2Token = await refresh()",
+      "accessToken: OAuth2AccessToken",
+      "secret: sha256WithRSAEncryption",
+      "secret_key = generate_key_v2()",
+      "token=base64url(random32)",
+      "POSTGRES_PASSWORD: postgres123",
+      '{"access_token":"2YotnFZFEjr1zCsicMWpAA","refresh_token":"tGzv3JOkF0XG5Qx2TlKWIA"}',
+    ]) {
+      expect(found(code), code).toEqual([]);
+    }
+  });
+
+  it("stays fast on inputs built to make regexes backtrack", () => {
+    const started = performance.now();
+    found("x.".repeat(200_000) + "://");
+    found(`-sk-${"a".repeat(50)}`.repeat(4000));
+    found("```json\n" + " ".repeat(80_000));
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
+  it("scans hand-written cassettes without response headers", () => {
+    const bare = interaction(undefined, `token ${keys.github}`);
+    Reflect.deleteProperty(bare.response, "headers");
+    expect(findSecrets([bare]).map((f) => f.kind)).toEqual(["GitHub token"]);
+  });
+
+  it("keeps the values configure() allowed when one cassette changes the action", async () => {
+    const { configure } = await import("../src/index.js");
+    configure({ secrets: { allow: [keys.github] } });
+    const dir = tmpDir();
+    const api = fakeApi(() => json(anthropicMessage(`Fixture token ${keys.github}`)));
+    await cassette("allowed", () => fetch(ANTHROPIC_URL, { method: "POST", body: "{}" }), { dir, fetch: api, secrets: "redact" });
+    expect(readFileSync(join(dir, "allowed.json"), "utf8")).toContain(keys.github);
   });
 });
 

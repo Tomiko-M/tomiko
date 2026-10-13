@@ -22,6 +22,8 @@ export interface ResponseContent {
 }
 
 const ANTHROPIC_TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
+/** How a Responses API stream ends: with the response, finished, cut short or failed. */
+const FINAL_RESPONSE = new Set(["response.completed", "response.incomplete", "response.failed"]);
 
 /** Gemini candidates: text parts (thought summaries aside) and function calls. */
 function fromCandidates(candidates: unknown[], text: string[], toolCalls: ToolCall[]): void {
@@ -95,7 +97,7 @@ function fromEvents(events: unknown[]): ResponseContent {
 
   for (const event of events.filter(isObj)) {
     // The Responses API ends with the full response object, which is the most reliable source.
-    if (event.type === "response.completed" && isObj(event.response)) return fromBody(event.response);
+    if (FINAL_RESPONSE.has(String(event.type)) && isObj(event.response)) return fromBody(event.response);
 
     if (event.type === "content_block_start" && isObj(event.content_block)) {
       const block = event.content_block;
@@ -165,7 +167,7 @@ export function stopReason(body: RecordedBody): string | undefined {
       if (typeof reason === "string") return reason;
     }
     if (o.object === "response" && typeof o.status === "string") return o.status;
-    if (o.type === "response.completed" && isObj(o.response)) return str(o.response.status);
+    if (FINAL_RESPONSE.has(String(o.type)) && isObj(o.response)) return str(o.response.status);
     return undefined;
   };
   if (body.type === "json") return fromObj(body.value);

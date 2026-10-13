@@ -24,9 +24,12 @@ interface Rule {
   test?: RegExp;
   /** The public start of a key, which is safe to show: `sk-ant-api03-`. */
   prefix?: RegExp;
-  valid?: (secret: string, groups: Groups) => boolean;
+  /** `next` is the character right after the match, if any. */
+  valid?: (secret: string, groups: Groups, next: string) => boolean;
   /** The secret is named after the field it is assigned to: `password=…`. */
   named?: boolean;
+  /** Skips the placeholder check, for long encoded bodies that can contain `xxxx` by chance. */
+  raw?: boolean;
 }
 
 /** Adds the flags every rule needs: `g` to find all matches, `d` for the secret group's position. */
@@ -47,6 +50,11 @@ export function isPlaceholder(value: string): boolean {
 
 /** jwt.io's sample token, which turns up whenever a model explains JWTs. */
 const KNOWN_EXAMPLES = new Set([
+  // The access token, refresh token, code and client secret in the OAuth 2.0 spec (RFC 6749).
+  "2YotnFZFEjr1zCsicMWpAA",
+  "tGzv3JOkF0XG5Qx2TlKWIA",
+  "SplxlOBeZQQYbYS6WxSbIA",
+  "7Fjfp0ZBr1KtDRbnfVdmIw",
   [
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
     "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
@@ -67,9 +75,32 @@ export function isSecretName(name: string): boolean {
   return SECRET_NAME.test(snake) && !COUNTER_NAME.test(snake);
 }
 
+/** Shannon entropy of a text in bits: how much a value could be guessed. */
+function entropyBits(value: string): number {
+  const counts = new Map<string, number>();
+  for (const char of value) counts.set(char, (counts.get(char) ?? 0) + 1);
+  let perChar = 0;
+  for (const n of counts.values()) perChar -= (n / value.length) * Math.log2(n / value.length);
+  return perChar * value.length;
+}
+
 /**
- * Whether a value assigned to a secret-named field is a real secret rather than code, a path or a
- * placeholder. Generated secrets nearly always mix letters and digits; `self.password` doesn't.
+ * An identifier made of words, `OAuth2AccessToken` or `generate_key_v2`, as code is full of. In a
+ * generated secret, letters fall into short runs that read as no word at all.
+ */
+function wordy(value: string): boolean {
+  const pieces = value.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g) ?? [];
+  const letters = pieces.reduce((n, piece) => n + piece.length, 0);
+  const inWords = pieces.filter((piece) => piece.length >= 3 && /[aeiouy]/i.test(piece)).reduce((n, piece) => n + piece.length, 0);
+  return letters > 0 && inWords / letters >= 0.8;
+}
+
+const classes = (value: string) => [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((re) => re.test(value)).length;
+
+/**
+ * Whether a value assigned to a secret-named field is a real secret rather than code, a path, a
+ * placeholder or a guessable demo value. Generated secrets mix letters and digits at random;
+ * `self.password`, `OAuth2Token` and `postgres123` don't.
  */
 function looksLikeSecret(value: string): boolean {
   if (value.length < 8 || value.length > 4096 || /\s/.test(value)) return false;
@@ -77,6 +108,8 @@ function looksLikeSecret(value: string): boolean {
   if (isPlaceholder(value)) return false;
   if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(value)) return false; // config.apiKey2
   if (/^(?:\/|\.\.?\/|~\/|[A-Za-z]:\\|[a-z][a-z0-9+.-]*:\/\/)/i.test(value)) return false; // paths and URLs
+  if (/^[A-Za-z_$][\w$]*$/.test(value) && wordy(value)) return false; // identifiers
+  if (classes(value) < 3 && entropyBits(value) < 40) return false; // guessable
   return true;
 }
 
@@ -90,7 +123,8 @@ const FORMATS = (
     {
       id: "openai-api-key",
       kind: "OpenAI API key",
-      pattern: /\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|[A-Za-z0-9_-]{16,}T3BlbkFJ[A-Za-z0-9_-]{16,})/,
+      // Bounded before the marker, so a long run of key-like text can't make the search quadratic.
+      pattern: /\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|[A-Za-z0-9_-]{16,300}?T3BlbkFJ[A-Za-z0-9_-]{16,})/,
       hints: ["sk-"],
       prefix: /^sk-(?:proj-|svcacct-|admin-)?/,
     },
@@ -123,10 +157,12 @@ const FORMATS = (
     {
       id: "private-key",
       kind: "Private key",
-      pattern: /-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----[\s\S]+?-----END[A-Z0-9 ]*PRIVATE KEY-----/,
-      hints: ["PRIVATE KEY-----"],
-      prefix: /^-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----/,
-      valid: (secret) => /[A-Za-z0-9+/]{40,}/.test(secret.replace(/\s+/g, "")),
+      pattern: /-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]{40,20000}?-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/,
+      hints: ["PRIVATE KEY"],
+      prefix: /^-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/,
+      // The body is base64, its line breaks real or written as `\n`; `...` stands in for one in docs.
+      valid: (secret) => !/\.\.\.|…|<[^>]*>/.test(secret) && /[A-Za-z0-9+/]{40,}/.test(secret.replace(/\\[nr]|\s+/g, "")),
+      raw: true,
     },
     { id: "jwt", kind: "JSON Web Token", pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, hints: ["eyJ"], prefix: /^eyJ/ },
     // DeepSeek, Moonshot, DashScope and other OpenAI-compatible APIs use plain `sk-` keys.
@@ -141,7 +177,7 @@ const CONTEXTS = (
     {
       id: "url-password",
       kind: "Password in a URL",
-      pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/?#@"'<>]+:(?<secret>[^\s/?#@"'<>]{3,})@/i,
+      pattern: /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/?#@"'<>]{1,256}:(?<secret>[^\s/?#@"'<>]{3,256})@/i,
       hints: ["://"],
       valid: (secret) => !/^(?:pass(?:word)?|secret|pwd)$/i.test(secret),
     },
@@ -149,9 +185,13 @@ const CONTEXTS = (
       id: "assignment",
       kind: "Secret",
       // The lookbehind starts names only at word starts, keeping long unbroken strings linear.
-      pattern: /(?<![A-Za-z0-9_.-])(?<name>[A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*["']?(?<secret>[^\s"'`,;&(){}<>[\]\\]{8,})/,
+      // A quoted value runs to its closing quote, whatever it contains; a bare one to the first
+      // character that can't be in one.
+      pattern:
+        /(?<![A-Za-z0-9_.-])(?<name>[A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:(?<q>["'`])(?<secret>(?:\\.|(?!\k<q>)[^\\\n]){8,4096})\k<q>|(?<bare>[^\s"'`,;&(){}<>[\]\\]{8,}))/,
       test: /key|secret|token|passw|passphrase/i,
-      valid: (secret, groups) => isSecretName(groups.name ?? "") && looksLikeSecret(secret),
+      // `token=base64url(random32)`, `key: Map<…>`, `secret = keys[0]`: code, not a value.
+      valid: (secret, groups, next) => isSecretName(groups.name ?? "") && looksLikeSecret(secret) && !"(<[".includes(next || "-"),
       named: true,
     },
   ] satisfies Rule[]
@@ -239,9 +279,10 @@ function scanText(text: string, guard: Guard, key?: string): Hit[] {
     if (r.test && !r.test.test(text)) return;
     for (const m of text.matchAll(r.pattern)) {
       const groups: Groups = m.groups ?? {};
-      const [start, end] = m.indices?.groups?.secret ?? m.indices![0]!;
+      const [start, end] = m.indices?.groups?.secret ?? m.indices?.groups?.bare ?? m.indices![0]!;
       const value = text.slice(start, end);
-      if (value.length === 0 || isPlaceholder(value) || (r.valid && !r.valid(value, groups))) continue;
+      const next = text[m.index + m[0].length] ?? "";
+      if (value.length === 0 || (!r.raw && isPlaceholder(value)) || (r.valid && !r.valid(value, groups, next))) continue;
       const name = r.named ? groups.name : undefined;
       hits.push({
         start,
@@ -278,8 +319,9 @@ export const placeholder = (hit: { label: string }) => `[REDACTED:${hit.label}]`
 
 /** `sk-ant-api03-…f9Qa`: the public prefix and the last four characters, never more. */
 function preview(hit: Hit): string {
-  if (hit.id === "private-key") return `${hit.value.split(/\r?\n/)[0]}…`;
   const head = hit.prefix?.exec(hit.value)?.[0] ?? "";
+  // A key's body is all secret, and its line breaks may be written as `\n`: show the header only.
+  if (hit.id === "private-key") return `${head}…`;
   return hit.value.length - head.length >= 16 ? `${head}…${hit.value.slice(-4)}` : `${head}••••••••`;
 }
 
@@ -458,7 +500,7 @@ function interactionSites(interaction: Interaction): Sites {
   let commit = () => {};
   requestSites(interaction.request, sites);
   const { response } = interaction;
-  for (const name of Object.keys(response.headers)) {
+  for (const name of Object.keys(response.headers ?? {})) {
     sites.push({
       part: "response header",
       path: name,
@@ -594,12 +636,25 @@ export function withoutSecrets(request: RecordedRequest, guard: Guard): Recorded
   return copy;
 }
 
-/** Replaces secrets in a text for display: `sk-ant-api03-…f9Qa`. */
-export function maskSecrets(text: string, guard: Guard | undefined = secretGuard(undefined)): string {
+/**
+ * Replaces secrets in a text for display: `sk-ant-api03-…f9Qa`. `key` is the field the text is the
+ * value of, so that `api_key: "…"` is masked whatever its format.
+ */
+export function maskSecrets(text: string, guard: Guard | undefined = secretGuard(undefined), key?: string): string {
   if (!guard) return text;
   let out = text;
-  for (const hit of scanText(text, guard).reverse()) out = out.slice(0, hit.start) + preview(hit) + out.slice(hit.end);
+  for (const hit of scanText(text, guard, key).reverse()) out = out.slice(0, hit.start) + preview(hit) + out.slice(hit.end);
   return out;
+}
+
+/** A copy of a JSON value with every secret in it masked, for printing it whole. */
+export function maskJson(value: unknown, guard: Guard | undefined, key?: string): unknown {
+  if (typeof value === "string") return maskSecrets(value, guard, key);
+  if (Array.isArray(value)) return value.map((item) => maskJson(item, guard, key));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, maskJson(v, guard, k)]));
+  }
+  return value;
 }
 
 const location = (f: Found) => (f.path ? `${f.part} › ${f.path}` : f.part);

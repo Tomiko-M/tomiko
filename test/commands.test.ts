@@ -155,6 +155,47 @@ describe("tomiko diff", () => {
   });
 });
 
+describe("what the review found", () => {
+  it("diffs from a subdirectory even with diff.relative set", async () => {
+    const root = repo();
+    git(root, "config", "diff.relative", "true");
+    write(root, "test/__cassettes__/faq.test.ts/hours.json", cassetteFile(exchange("Hours?", "Closed.")));
+    const { io, out } = fakeIo(join(root, "test"));
+    expect(await main(["diff"], io)).toBe(0);
+    expect(out.join("\n")).toContain("~ __cassettes__/faq.test.ts/hours.json");
+  });
+
+  it("compares two files with git when --base is given", async () => {
+    const root = repo();
+    write(root, "test/__cassettes__/faq.test.ts/hours.json", cassetteFile(exchange("Hours?", "Closed.")));
+    const { io, out } = fakeIo(root);
+    expect(await main(["diff", "--base", "HEAD", "test/__cassettes__/faq.test.ts/hours.json", "test/__cassettes__/faq.test.ts/greets.json"], io)).toBe(0);
+    expect(out[0]).toMatch(/tomiko diff {2}HEAD [0-9a-f]+ → working tree/);
+  });
+
+  it("masks every string in diff --json", async () => {
+    const root = repo();
+    write(root, "test/__cassettes__/faq.test.ts/hours.json", cassetteFile(exchange("Hours?", `Token ${keys.github}`)));
+    const { io, out } = fakeIo(root);
+    expect(await main(["diff", "--json"], io)).toBe(0);
+    expect(out.join("\n")).not.toContain(keys.github);
+    expect(out.join("\n")).toContain("ghp_…");
+  });
+
+  it("knows a streamed key is committed", async () => {
+    const root = repo();
+    const parts = ["Your key: ", keys.anthropic.slice(0, 30), keys.anthropic.slice(30)];
+    const events = parts.map((text) => `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } })}\n\n`);
+    const streamed = exchange("Key?", "");
+    streamed.response = { status: 200, headers: { "content-type": "text/event-stream" }, body: { type: "sse", chunks: events } };
+    write(root, "test/__cassettes__/faq.test.ts/hours.json", cassetteFile(streamed));
+    git(root, "commit", "-qam", "leaked");
+    const { io, out } = fakeIo(root);
+    expect(await main(["scan", "--json"], io)).toBe(1);
+    expect(JSON.parse(out.join("\n")).files[0].findings[0]).toMatchObject({ kind: "Anthropic API key", committed: true });
+  });
+});
+
 describe("tomiko scan", () => {
   it("passes a clean project", async () => {
     const { io, out } = fakeIo(repo());

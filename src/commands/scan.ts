@@ -8,7 +8,7 @@ import { saveCassette } from "../store.js";
 import { Spinner } from "../terminal.js";
 import type { SecretFinding } from "../types.js";
 import { discoverCassettes } from "../view/discover.js";
-import { type Command, failure } from "./common.js";
+import { type Command, failure, parseCassette } from "./common.js";
 
 interface Located extends SecretFinding {
   /** 1-based position of its first appearance in the file, when it appears there in one piece. */
@@ -75,14 +75,14 @@ export const scan: Command = {
       const secrets = summarize(scanInteractions(cassette.data.interactions, guard));
       if (secrets.length === 0) continue;
       const text = await readFile(cassette.file, "utf8");
-      const committed = root ? await readAt(io.cwd, "HEAD", relative(root, cassette.file).split(sep).join("/")) : undefined;
+      // The committed file is scanned the same way, so a key split over stream events or inside a
+      // base64 body is recognized there too.
+      const head = root ? parseCassette(await readAt(io.cwd, "HEAD", relative(root, cassette.file).split(sep).join("/"))) : undefined;
+      const committed = new Set(head ? summarize(scanInteractions(head.interactions, guard)).map((s) => s.value) : []);
       reports.push({
         path: cassette.path,
         file: cassette.file,
-        findings: secrets.map(({ value, ...finding }) => {
-          const escaped = JSON.stringify(value).slice(1, -1);
-          return { ...finding, ...locate(text, value), committed: committed?.includes(escaped) ?? false };
-        }),
+        findings: secrets.map(({ value, ...finding }) => ({ ...finding, ...locate(text, value), committed: committed.has(value) })),
       });
       if (fix) {
         const { interactions } = redactInteractions(cassette.data.interactions, guard);
