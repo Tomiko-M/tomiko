@@ -1,3 +1,4 @@
+import { fromEvent } from "./eventstream.js";
 import type { RecordedBody, RecordedResponse } from "./types.js";
 
 const SECRET_PARAM = /^(key|api[-_]?key|access[-_]?token|token|auth|sig|signature)$/i;
@@ -34,14 +35,18 @@ export function parseRequestBody(text: string | undefined, contentType?: string 
 
 /**
  * Response headers worth keeping. Request headers are never stored, so API keys can't leak into
- * cassettes; on the response side, an allowlist keeps out cookies and organization ids.
+ * cassettes; on the response side, an allowlist keeps out cookies and organization ids. AWS
+ * names an error's type only in `x-amzn-errortype`, which its SDK needs to throw the right class,
+ * and Bedrock reports the tokens of an InvokeModel call in `x-amzn-bedrock-*` headers.
  */
-const KEPT_HEADERS = new Set(["content-type", "retry-after", "request-id", "x-request-id"]);
+const KEPT_HEADERS = new Set(["content-type", "retry-after", "request-id", "x-request-id", "x-amzn-requestid", "x-amzn-errortype"]);
+const KEPT_PREFIX = "x-amzn-bedrock-";
 
 export function pickHeaders(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
   headers.forEach((value, name) => {
-    if (KEPT_HEADERS.has(name.toLowerCase())) out[name.toLowerCase()] = value;
+    const lower = name.toLowerCase();
+    if (KEPT_HEADERS.has(lower) || lower.startsWith(KEPT_PREFIX)) out[lower] = value;
   });
   return out;
 }
@@ -89,15 +94,21 @@ function bodyInit(body: RecordedBody): BodyInit | null {
       return Buffer.from(body.value, "base64");
     case "sse": {
       const encoder = new TextEncoder();
-      const chunks = body.chunks;
-      return new ReadableStream<Uint8Array>({
-        start(controller) {
-          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-          controller.close();
-        },
-      });
+      return chunked(body.chunks.map((chunk) => encoder.encode(chunk)));
     }
+    case "eventstream":
+      // One frame per chunk, as Bedrock sends them.
+      return chunked(body.events.map(fromEvent));
   }
+}
+
+function chunked(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
 }
 
 /** Builds a live Response from a recording. Streams replay chunk by chunk, exactly as recorded. */
@@ -119,14 +130,34 @@ export interface RecordedStream {
   settle(): Promise<number>;
 }
 
+/** Where a recorded stream's bytes go: each chunk as it is read, then the end. */
+export interface StreamSink {
+  chunk(bytes: Uint8Array): void;
+  end(): void;
+}
+
+/** Keeps a text stream (SSE) as the text chunks it arrived in. */
+export function textSink(chunks: string[]): StreamSink {
+  const decoder = new TextDecoder();
+  return {
+    chunk(bytes) {
+      const text = decoder.decode(bytes, { stream: true });
+      if (text) chunks.push(text);
+    },
+    end() {
+      const rest = decoder.decode();
+      if (rest) chunks.push(rest);
+    },
+  };
+}
+
 /**
- * Passes `source` through to the caller while copying each chunk into `chunks` as it is read, so
+ * Passes `source` through to the caller while copying each chunk into `sink` as it is read, so
  * everything the caller has seen is already recorded. A caller that stops early (or never reads)
  * doesn't truncate the recording: `settle()` drains the rest.
  */
-export function recordStream(source: ReadableStream<Uint8Array>, chunks: string[]): RecordedStream {
+export function recordStream(source: ReadableStream<Uint8Array>, sink: StreamSink): RecordedStream {
   const reader = source.getReader();
-  const decoder = new TextDecoder();
   let endedAt: number | undefined;
   let failure: { error: unknown } | undefined;
 
@@ -135,13 +166,13 @@ export function recordStream(source: ReadableStream<Uint8Array>, chunks: string[
   const pump = async (): Promise<Uint8Array | undefined> => {
     const { done, value } = await reader.read();
     if (done) {
-      const rest = decoder.decode();
-      if (rest) chunks.push(rest);
-      endedAt ??= Date.now();
+      if (endedAt === undefined) {
+        sink.end();
+        endedAt = Date.now();
+      }
       return undefined;
     }
-    const text = decoder.decode(value, { stream: true });
-    if (text) chunks.push(text);
+    sink.chunk(value);
     return value;
   };
 

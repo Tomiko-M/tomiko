@@ -13,6 +13,7 @@ const STYLES = /* css */ `
   --bg: #f7f7f5; --panel: #ffffff; --sunken: #f0efec; --border: #e3e1dc; --text: #1c1b19;
   --muted: #6b6862; --accent: #b4441f; --accent-soft: #f8e6de; --ok: #2f7a4b; --ok-soft: #e1f1e6;
   --bad: #b3261e; --bad-soft: #fbe3e1; --tool: #5b4bb7; --tool-soft: #ebe8fa; --result: #22667f; --result-soft: #e0f0f5;
+  --cloud: #8a5a00; --cloud-soft: #fbefd9;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -20,6 +21,7 @@ const STYLES = /* css */ `
     --bg: #161514; --panel: #1f1e1c; --sunken: #262522; --border: #34322e; --text: #ece9e3;
     --muted: #a19d95; --accent: #f08a5d; --accent-soft: #3a261d; --ok: #7cc79a; --ok-soft: #1d2e23;
     --bad: #f28b82; --bad-soft: #3a1f1d; --tool: #b3a8f5; --tool-soft: #29253f; --result: #7fc4dc; --result-soft: #1a2d34;
+    --cloud: #f2b955; --cloud-soft: #33280f;
     color-scheme: dark;
   }
 }
@@ -50,6 +52,7 @@ h1 { font-size: 18px; margin: 0 0 4px; overflow-wrap: anywhere; }
 .badge.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .badge.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
 .badge.judge { background: var(--tool-soft); color: var(--tool); border-color: transparent; }
+.badge.cloud { background: var(--cloud-soft); color: var(--cloud); border-color: transparent; }
 .spacer { flex: 1; }
 .facts { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .body { padding: 12px 14px; display: grid; gap: 10px; }
@@ -155,6 +158,7 @@ function renderInteraction(i, previousIndex) {
     h("div", { class: "card-head" },
       h("span", { class: "num" }, "#" + i.index),
       i.judge && h("span", { class: "badge judge" }, "judge"),
+      i.provider === "bedrock" && h("span", { class: "badge cloud", title: "Amazon Bedrock" }, "Bedrock"),
       i.model && h("span", { class: "badge mono" }, i.model),
       h("span", { class: "badge " + (ok ? "ok" : "bad") }, String(i.status)),
       i.response.streamed && h("span", { class: "badge" }, "stream"),

@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventStreamCodec } from "@smithy/eventstream-codec";
 
 export const tmpDir = () => mkdtempSync(join(tmpdir(), "tomiko-"));
 
@@ -14,7 +15,8 @@ export function fakeApi(handler: (body: any, request: Request, call: number) => 
   const calls: FakeApi["calls"] = [];
   const api = async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
-    const text = await request.text();
+    // A clone, so the handler can still read the request.
+    const text = await request.clone().text();
     const body = text ? JSON.parse(text) : undefined;
     calls.push({ url: request.url, body });
     return handler(body, request, calls.length);
@@ -282,4 +284,82 @@ export function geminiStream(parts: string[], model = "gemini-2.5-flash") {
       modelVersion: model,
     },
   }));
+}
+
+export const BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com";
+export const BEDROCK_CLAUDE = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+export const BEDROCK_NOVA = "us.amazon.nova-lite-v1:0";
+
+/** A Bedrock Converse response. */
+export function converseResponse(options: { text?: string; tools?: FakeTool[]; stopReason?: string } = {}) {
+  const tools = options.tools ?? [];
+  return {
+    output: {
+      message: {
+        role: "assistant",
+        content: [
+          ...(options.text !== undefined ? [{ text: options.text }] : []),
+          ...tools.map((t, i) => ({ toolUse: { toolUseId: `tooluse_${random(22, i)}`, name: t.name, input: t.input } })),
+        ],
+      },
+    },
+    stopReason: options.stopReason ?? (tools.length > 0 ? "tool_use" : "end_turn"),
+    usage: { inputTokens: 300, outputTokens: 40, totalTokens: 1340, cacheReadInputTokens: 1000, cacheWriteInputTokens: 0 },
+    metrics: { latencyMs: 812 },
+  };
+}
+
+/** ConverseStream events: text in pieces, a tool's input as JSON text in pieces, usage at the end. */
+export function converseStream(options: { parts?: string[]; tool?: FakeTool } = {}) {
+  const parts = options.parts ?? [];
+  const events: { event: string; data: unknown }[] = [{ event: "messageStart", data: { role: "assistant" } }];
+  for (const text of parts) events.push({ event: "contentBlockDelta", data: { delta: { text }, contentBlockIndex: 0 } });
+  if (parts.length > 0) events.push({ event: "contentBlockStop", data: { contentBlockIndex: 0 } });
+  if (options.tool) {
+    const index = parts.length > 0 ? 1 : 0;
+    const input = JSON.stringify(options.tool.input);
+    events.push({ event: "contentBlockStart", data: { start: { toolUse: { toolUseId: `tooluse_${random(22, 3)}`, name: options.tool.name } }, contentBlockIndex: index } });
+    for (const piece of [input.slice(0, 5), input.slice(5)]) events.push({ event: "contentBlockDelta", data: { delta: { toolUse: { input: piece } }, contentBlockIndex: index } });
+    events.push({ event: "contentBlockStop", data: { contentBlockIndex: index } });
+  }
+  events.push({ event: "messageStop", data: { stopReason: options.tool ? "tool_use" : "end_turn" } });
+  events.push({ event: "metadata", data: { usage: { inputTokens: 250, outputTokens: 30, totalTokens: 280 }, metrics: { latencyMs: 640 } } });
+  return events;
+}
+
+/** An InvokeModel stream: the model's own events, each base64 in a `chunk`, ending with Bedrock's count. */
+export function invokeStream(events: { data: unknown }[]) {
+  return events.map((e, i) => {
+    const data = i === events.length - 1
+      ? { ...(e.data as object), "amazon-bedrock-invocationMetrics": { inputTokenCount: 120, outputTokenCount: 42, invocationLatency: 900, firstByteLatency: 300 } }
+      : e.data;
+    return { event: "chunk", data: { bytes: Buffer.from(JSON.stringify(data)).toString("base64"), p: "abcdefghijklmnop".slice(0, (i % 7) + 3) } };
+  });
+}
+
+/**
+ * An AWS event stream, framed by the AWS SDK's own codec and cut into chunks that split frames,
+ * as the network does. `exception` frames carry an error mid-stream.
+ */
+export function awsEventStream(events: { event?: string; exception?: string; data: unknown }[], chunkSize = 53): Response {
+  const codec = new EventStreamCodec((s: Uint8Array) => Buffer.from(s).toString("utf8"), (s: string) => new Uint8Array(Buffer.from(s, "utf8")));
+  const bytes = Buffer.concat(
+    events.map((e) =>
+      codec.encode({
+        headers: {
+          ":message-type": { type: "string", value: e.exception ? "exception" : "event" },
+          ...(e.exception ? { ":exception-type": { type: "string", value: e.exception } } : { ":event-type": { type: "string", value: e.event ?? "chunk" } }),
+          ":content-type": { type: "string", value: "application/json" },
+        },
+        body: new Uint8Array(Buffer.from(JSON.stringify(e.data))),
+      }),
+    ),
+  );
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < bytes.length; i += chunkSize) controller.enqueue(new Uint8Array(bytes.subarray(i, i + chunkSize)));
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/vnd.amazon.eventstream", "x-amzn-requestid": "req-1" } });
 }

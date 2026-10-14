@@ -11,7 +11,7 @@ import {
   type TextChange,
   type Totals,
 } from "../compare.js";
-import { change, duration, plural, tokens, usd } from "../format.js";
+import { change, duration, plural, shortModel, tokens, usd } from "../format.js";
 import { changedFiles, GitError, readAt, repoRoot, resolveRevision } from "../git.js";
 import { canonical, type DiffEntry } from "../match.js";
 import { maskJson, maskSecrets, secretGuard } from "../secrets.js";
@@ -193,9 +193,11 @@ function requestHeader(ctx: Ctx, r: RequestDiff): string {
   const { p } = ctx;
   // Masked whole, since some secrets are recognized by their host (a Slack webhook), then cut down
   // to the path.
-  const path = ctx.mask(r.url).replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "").replace(/[?#].*$/, "") || "/";
-  const modelBefore = r.before?.model;
-  const modelAfter = r.after?.model;
+  const path = (ctx.mask(r.url).replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "").replace(/[?#].*$/, "") || "/")
+    // A Bedrock path holds the model, shown next to it anyway.
+    .replace(/^\/model\/[^/]+\//, "/model/…/");
+  const modelBefore = r.before?.model && shortModel(r.before.model);
+  const modelAfter = r.after?.model && shortModel(r.after.model);
   const model =
     r.status === "changed" && modelBefore !== modelAfter
       ? `${p.red(modelBefore ?? "?")} ${p.dim("→")} ${p.green(modelAfter ?? "?")}`

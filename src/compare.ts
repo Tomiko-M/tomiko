@@ -3,6 +3,7 @@
  * which tools it called and with what, why it stopped, what it answered, and what that cost.
  * Ids, signatures, timestamps and other values that change with every recording are ignored.
  */
+import { readableBody } from "./converse.js";
 import { readContent, stopReason } from "./inspect.js";
 import { canonical, diff, type DiffEntry } from "./match.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
@@ -132,9 +133,9 @@ export interface DiffOptions {
 /* -------------------------------------------------------------------------------------------- */
 
 /** Values each recording mints anew: message, tool call and response ids. */
-const GENERATED_ID = /^(?:msg|toolu|srvtoolu|mcptoolu|call|fc|resp|rs|ws|ci|ctc|chatcmpl|run|step|req)[_-][A-Za-z0-9_-]{6,}$/;
+const GENERATED_ID = /^(?:msg|toolu|tooluse|srvtoolu|mcptoolu|call|fc|resp|rs|ws|ci|ctc|chatcmpl|run|step|req)[_-][A-Za-z0-9_-]{6,}$/;
 /** Fields that hold such ids. A tool's own arguments (`"script": "run-unit-tests"`) are left alone. */
-const ID_KEY = /^(?:id|call_id|tool_use_id|tool_call_id|previous_response_id|item_id)$/;
+const ID_KEY = /^(?:id|call_id|tool_use_id|tool_call_id|toolUseId|previous_response_id|item_id)$/;
 /** Thinking signatures and encrypted reasoning, sent back verbatim in later turns. */
 const OPAQUE = new Set(["signature", "encrypted_content"]);
 
@@ -217,7 +218,7 @@ function geminiTurns(body: Obj, parts: RequestParts): void {
 
 /** Splits a request into what you wrote (system prompt, user turns, tools, parameters) and history. */
 function requestParts(request: { url: string; body?: unknown }): RequestParts {
-  const body = request.body;
+  const body = readableBody(request);
   const parts: RequestParts = { system: [], prompt: [], history: [], tools: new Map(), params: {} };
   parts.model = requestModel(request);
   if (!isObj(body)) {
@@ -359,7 +360,7 @@ function errorMessage(interaction: Interaction): string {
 export function sideOf(interaction: Interaction, pricing: PricingTable): Side {
   const { request, response, meta } = interaction;
   const content = readContent(response.body);
-  const { model: responseModel, usage } = extractUsage(response.body);
+  const { model: responseModel, usage } = extractUsage(response.body, response.headers);
   const model = responseModel ?? meta.model ?? requestModel(request);
   const price = model && usage ? priceFor(model, pricing) : undefined;
   return {

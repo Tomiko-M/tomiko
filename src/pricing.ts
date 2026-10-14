@@ -50,21 +50,38 @@ export const defaultPricing: PricingTable = {
   "gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 },
   "gemini-2.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0.3 },
   "gemini-2.5-flash-lite": { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0.1 },
+
+  // Amazon Bedrock, on demand. Claude costs what it costs from Anthropic (listed above; the
+  // regional endpoints of newer Claude models add 10%). Nova reads its cache at a quarter of the
+  // input price and writes it at no extra cost.
+  "amazon.nova-micro": { input: 0.035, output: 0.14, cacheRead: 0.00875, cacheWrite: 0.035 },
+  "amazon.nova-lite": { input: 0.06, output: 0.24, cacheRead: 0.015, cacheWrite: 0.06 },
+  "amazon.nova-pro": { input: 0.8, output: 3.2, cacheRead: 0.2, cacheWrite: 0.8 },
+  "amazon.nova-premier": { input: 2.5, output: 12.5, cacheRead: 0.625, cacheWrite: 2.5 },
+  "amazon.nova-2-lite": { input: 0.3, output: 2.5, cacheRead: 0.075, cacheWrite: 0.3 },
+  "deepseek.r1": { input: 1.35, output: 5.4 },
+  "openai.gpt-oss-120b": { input: 0.15, output: 0.6 },
+  "meta.llama4-maverick-17b-instruct": { input: 0.24, output: 0.97 },
 };
 
-/** Strips platform decorations: Bedrock's `anthropic.` and region prefixes, Vertex's `@version`, Gemini's `models/`. */
+/**
+ * Strips platform decorations: a Bedrock ARN, an inference profile's region (`us.`, `eu.`,
+ * `global.`…) and `anthropic.` before a Claude model; Vertex's `@version`; Gemini's `models/`.
+ */
 function normalizeModel(model: string): string {
   return model
-    .replace(/^(?:[a-z]{2,6}\.)?anthropic\.|^models\//, "")
+    .replace(/^arn:aws[a-z-]*:bedrock:[^/]*\/(?!.*\/)/, "")
+    .replace(/^(?:us|us-gov|eu|apac|jp|au|ca|global)\./, "")
+    .replace(/^anthropic\.|^models\//, "")
     .replace(/@.*$/, "");
 }
 
 /**
  * What may follow a model id in a snapshot of it: a date or build (`-20251001`, `-2025-08-07`,
- * `-001`), a platform version (`-v1:0`), `-latest`, `-preview` or `-exp`. A short number is a
+ * `-001`), a platform version (`-v1:0`, `-1:0`), `-latest`, `-preview` or `-exp`. A short number is a
  * model of its own: `claude-opus-5-5` is not a snapshot of `claude-opus-5`.
  */
-const SNAPSHOT = /^-(?:\d{3,}|v\d|latest\b|preview\b|exp\b)/;
+const SNAPSHOT = /^-(?:\d{3,}|v\d|\d+:\d|latest\b|preview\b|exp\b)/;
 
 /**
  * Exact match first, otherwise the longest key the model id is a snapshot of: `gpt-5-2025-08-07`,

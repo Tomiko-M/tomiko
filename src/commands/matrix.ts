@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { diffCassettes, sideOf } from "../compare.js";
 import { LOG_ENV, MODEL_ENV, SHADOW_ENV } from "../control.js";
-import { duration, money, plural } from "../format.js";
+import { duration, money, plural, shortModel } from "../format.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
 import { type Paint, Spinner, width } from "../terminal.js";
 import type { CassetteFile } from "../types.js";
@@ -37,7 +37,7 @@ function costAt(files: CassetteFile[], model: string): number | null {
   for (const file of files) {
     for (const interaction of file.interactions) {
       if (interaction.meta.judge) continue;
-      const { usage } = extractUsage(interaction.response.body);
+      const { usage } = extractUsage(interaction.response.body, interaction.response.headers);
       if (usage) total += costOf(usage, price);
     }
   }
@@ -79,7 +79,7 @@ function ratio(p: Paint, cost: number | null, now: number | null): string {
 
 function table(p: Paint, rows: Row[], now: Row): string[] {
   const cells = rows.map((row) => [
-    row.now ? `${p.bold(row.model)} ${p.dim("now")}` : p.bold(row.model),
+    row.now ? `${p.bold(shortModel(row.model))} ${p.dim("now")}` : p.bold(shortModel(row.model)),
     testsCell(p, row),
     row.cost === null ? p.dim("no price") : money(row.cost),
     row.now ? "" : ratio(p, row.cost, now.cost),
@@ -101,22 +101,22 @@ function verdict(p: Paint, rows: Row[], now: Row): string {
   if (best.now) {
     const note =
       cheapest && !cheapest.now && cheapest.cost! < now.cost!
-        ? ` ${cheapest.model} costs ${(now.cost! / cheapest.cost!).toFixed(1)}× less but fails ${plural(cheapest.tests?.failed.length ?? 1, "test")}.`
+        ? ` ${shortModel(cheapest.model)} costs ${(now.cost! / cheapest.cost!).toFixed(1)}× less but fails ${plural(cheapest.tests?.failed.length ?? 1, "test")}.`
         : "";
-    return `${p.accent("◆")} Nothing cheaper passes every test: ${p.bold(now.model)}, what you use now, stays the best buy.${note}`;
+    return `${p.accent("◆")} Nothing cheaper passes every test: ${p.bold(shortModel(now.model))}, what you use now, stays the best buy.${note}`;
   }
   const factor = now.cost && best.cost ? now.cost / best.cost : undefined;
   const saving = factor && factor > 1 ? ` at ${factor.toFixed(1)}× less than now` : factor && factor < 1 ? `, though it costs ${(1 / factor).toFixed(1)}× more` : "";
-  return `${p.accent("◆")} ${p.bold(best.model)} passes every test${saving}.`;
+  return `${p.accent("◆")} ${p.bold(shortModel(best.model))} passes every test${saving}.`;
 }
 
 function failures(p: Paint, rows: Row[]): string[] {
-  const pad = Math.max(...rows.map((r) => r.model.length));
+  const pad = Math.max(...rows.map((r) => shortModel(r.model).length));
   return rows
     .filter((r) => r.tests && r.tests.failed.length > 0)
     .map((r) => {
       const shown = r.tests!.failed.slice(0, 2).join(", ") + (r.tests!.failed.length > 2 ? ` and ${r.tests!.failed.length - 2} more` : "");
-      return `  ${p.red("✖")} ${r.model.padEnd(pad)}  ${p.dim(shown)}`;
+      return `  ${p.red("✖")} ${shortModel(r.model).padEnd(pad)}  ${p.dim(shown)}`;
     });
 }
 
@@ -160,8 +160,8 @@ export const matrix: Command = {
     const estimates = models.map((model) => ({ model, cost: costAt(files, model) }));
     const total = estimates.reduce((sum, e) => sum + (e.cost ?? 0), 0);
     io.log(`  ${p.accent("●")} About ${p.bold(money(total))} to run your tests on ${plural(models.length, "model")}, judging by the current recordings:`);
-    const pad = Math.max(...models.map((m) => m.length));
-    for (const e of estimates) io.log(`      ${e.model.padEnd(pad)}  ${e.cost === null ? p.dim("no price, so not counted") : money(e.cost)}`);
+    const pad = Math.max(...models.map((m) => shortModel(m).length));
+    for (const e of estimates) io.log(`      ${shortModel(e.model).padEnd(pad)}  ${e.cost === null ? p.dim("no price, so not counted") : money(e.cost)}`);
     io.log("");
     if (maxCost !== undefined && total > maxCost) return failure(io, p, `That is more than --max-cost ${args.flags["max-cost"] as string}. Nothing was run.`);
     if (!(await approve(io, p, args.flags.yes === true, `Run your tests on ${plural(models.length, "model")}?`))) return 1;

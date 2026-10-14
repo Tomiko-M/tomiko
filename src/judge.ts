@@ -5,12 +5,16 @@
  */
 import { TomikoError } from "./errors.js";
 import { dispatch, runtime } from "./runtime.js";
+import { findCredentials, sign } from "./sigv4.js";
+import { isBedrockModel } from "./usage.js";
 
 export interface JudgeOptions {
   /**
-   * The model that judges: an Anthropic, OpenAI or Gemini model, told apart by its name.
+   * The model that judges: an Anthropic, OpenAI or Gemini model, or a Bedrock model id
+   * (`us.anthropic.claude-haiku-4-5-20251001-v1:0`), told apart by its name.
    * Default: `claude-haiku-5-5`. The API key comes from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
-   * `GEMINI_API_KEY`; replays need none.
+   * `GEMINI_API_KEY`; for Bedrock, from `AWS_BEARER_TOKEN_BEDROCK` or your AWS credentials, in
+   * `AWS_REGION`. Replays need none.
    */
   model?: string;
 }
@@ -39,17 +43,41 @@ function env(name: string): string | undefined {
   return process.env[name] || undefined;
 }
 
-type Provider = "anthropic" | "openai" | "google";
+type Provider = "anthropic" | "openai" | "google" | "bedrock";
 
 function providerOf(model: string): Provider {
+  if (isBedrockModel(model)) return "bedrock";
   if (/^claude|anthropic/i.test(model)) return "anthropic";
   if (/^(gpt|o\d|chatgpt)/i.test(model)) return "openai";
   if (/^gemini/i.test(model)) return "google";
-  throw new TomikoError(`tomiko can't tell which API serves the judge model "${model}". Use a claude-, gpt- or gemini- model.`);
+  throw new TomikoError(`tomiko can't tell which API serves the judge model "${model}". Use a claude-, gpt- or gemini- model, or a Bedrock model id.`);
+}
+
+/**
+ * The judge on Bedrock, through Converse, which every model there speaks. Signed with SigV4
+ * unless a Bedrock API key is set; sent unsigned without credentials, which a replay doesn't need.
+ */
+function bedrockRequest(model: string, output: string, criteria: string): { url: string; headers: Record<string, string>; body: string } {
+  const region = env("AWS_REGION") ?? env("AWS_DEFAULT_REGION") ?? "us-east-1";
+  const base = (env("AWS_ENDPOINT_URL_BEDROCK_RUNTIME") ?? `https://bedrock-runtime.${region}.amazonaws.com`).replace(/\/$/, "");
+  const url = `${base}/model/${encodeURIComponent(model)}/converse`;
+  const body = JSON.stringify({
+    system: [{ text: SYSTEM }],
+    messages: [{ role: "user", content: [{ text: prompt(output, criteria) }] }],
+    inferenceConfig: { maxTokens: 300, temperature: 0 },
+  });
+  const headers = new Headers({ "content-type": "application/json" });
+  const token = env("AWS_BEARER_TOKEN_BEDROCK");
+  const credentials = token ? undefined : findCredentials();
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  else if (credentials) sign({ method: "POST", url, headers, body, credentials, region, service: "bedrock" });
+  // Added after signing: tomiko takes it off before the request leaves.
+  headers.set(JUDGE_HEADER, "1");
+  return { url, headers: Object.fromEntries(headers), body };
 }
 
 /** The judge's request, in its provider's format. The key header is left out when there is none. */
-function request(provider: Provider, model: string, output: string, criteria: string): { url: string; headers: Record<string, string>; body: unknown } {
+function request(provider: Exclude<Provider, "bedrock">, model: string, output: string, criteria: string): { url: string; headers: Record<string, string>; body: unknown } {
   const headers: Record<string, string> = { "content-type": "application/json", [JUDGE_HEADER]: "1" };
   if (provider === "anthropic") {
     const key = env("ANTHROPIC_API_KEY");
@@ -102,6 +130,9 @@ function answerText(provider: Provider, body: unknown): string {
     const message = isObj(body.choices[0]) && isObj(body.choices[0].message) ? body.choices[0].message : {};
     return typeof message.content === "string" ? message.content : "";
   }
+  if (provider === "bedrock" && isObj(body.output) && isObj(body.output.message) && Array.isArray(body.output.message.content)) {
+    return body.output.message.content.filter(isObj).map((b) => (typeof b.text === "string" ? b.text : "")).join("");
+  }
   if (provider === "google" && Array.isArray(body.candidates)) {
     const content = isObj(body.candidates[0]) && isObj(body.candidates[0].content) ? body.candidates[0].content : {};
     return (Array.isArray(content.parts) ? content.parts.filter(isObj) : []).map((p) => (typeof p.text === "string" ? p.text : "")).join("");
@@ -140,11 +171,20 @@ export async function judge(output: unknown, criteria: string, options: JudgeOpt
   if (typeof criteria !== "string" || !criteria.trim()) throw new TomikoError("judge() needs criteria: what the output must do, in words.");
   const model = options.model ?? runtime.defaults.judge?.model ?? DEFAULT_MODEL;
   const provider = providerOf(model);
-  const { url, headers, body } = request(provider, model, outputOf(output), criteria);
-  const response = await dispatch(url, { method: "POST", headers, body: JSON.stringify(body) });
+  const { url, headers, body } =
+    provider === "bedrock"
+      ? bedrockRequest(model, outputOf(output), criteria)
+      : (({ url, headers, body }) => ({ url, headers, body: JSON.stringify(body) }))(request(provider, model, outputOf(output), criteria));
+  const response = await dispatch(url, { method: "POST", headers, body });
   const text = await response.text();
   if (!response.ok) {
-    const hint = response.status === 401 || response.status === 403 ? ` Set ${{ anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", google: "GEMINI_API_KEY" }[provider]} to record a verdict.` : "";
+    const keys = {
+      anthropic: "ANTHROPIC_API_KEY",
+      openai: "OPENAI_API_KEY",
+      google: "GEMINI_API_KEY",
+      bedrock: "AWS_BEARER_TOKEN_BEDROCK, or AWS credentials with AWS_REGION,",
+    };
+    const hint = response.status === 401 || response.status === 403 ? ` Set ${keys[provider]} to record a verdict.` : "";
     throw new TomikoError(`The judge (${model}) answered ${response.status}: ${text.slice(0, 300)}${hint}`);
   }
   let parsed: unknown;

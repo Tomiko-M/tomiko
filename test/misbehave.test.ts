@@ -189,6 +189,6 @@ describe("an agent meeting a misbehaving model", () => {
     const error = await withFaults(api, [fault.refusal()], () => fetch("https://example.com/api", { method: "POST", body: "{}" }).then((r) => r.json())).catch(
       (e: unknown) => e as Error,
     );
-    expect(error.message).toBe('Fault "refusal" can\'t rewrite this response: tomiko knows the answers of Anthropic, OpenAI and Gemini.');
+    expect(error.message).toBe('Fault "refusal" can\'t rewrite this response: tomiko knows the answers of Anthropic, OpenAI, Gemini and Bedrock.');
   });
 });

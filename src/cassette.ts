@@ -8,7 +8,9 @@ import {
   pickHeaders,
   recordStream,
   redactUrl,
+  textSink,
 } from "./http.js";
+import { eventSink, isAwsEventStream } from "./eventstream.js";
 import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js";
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
@@ -36,10 +38,12 @@ import type {
   RecordedCall,
   RecordedRequest,
   RecordedResponse,
+  StreamEvent,
   TomikoOptions,
   ToolCall,
 } from "./types.js";
-import { detectProvider, extractUsage, requestModel } from "./usage.js";
+import { parseAuthorization, findCredentials, maskKeyId, sign } from "./sigv4.js";
+import { BEDROCK_PATH, bedrockFamily, detectProvider, extractUsage, isBedrockModel, matchUrl, requestModel } from "./usage.js";
 
 const MODES: readonly Mode[] = ["auto", "replay", "record"];
 
@@ -60,16 +64,18 @@ export function resolveMode(option?: Mode): Mode {
 
 /** The API a model belongs to, by its name, when it is one tomiko knows. */
 function apiOf(model: string): string | undefined {
+  if (isBedrockModel(model)) return "bedrock";
   if (/^claude/i.test(model)) return "anthropic";
   if (/^(gpt|o\d|chatgpt)/i.test(model)) return "openai";
   if (/^gemini/i.test(model)) return "google";
   return undefined;
 }
 
-/** The same request, asking `model`: in the body's `model` field, or in Gemini's path. */
+/** The same request, asking `model`: in the body's `model` field, or in Gemini's and Bedrock's path. */
 async function withModel(request: Request, model: string): Promise<Request> {
   const provider = detectProvider(request.url, request.headers);
   const wanted = apiOf(model);
+  if (provider === "bedrock") return withBedrockModel(request, model);
   if (wanted && provider && ["anthropic", "openai", "google"].includes(provider) && wanted !== provider) {
     throw new TomikoError(`TOMIKO_MODEL=${model} is a model of another API: this request goes to the ${provider} API.`);
   }
@@ -85,6 +91,47 @@ async function withModel(request: Request, model: string): Promise<Request> {
   }
   const headers = new Headers(request.headers);
   headers.delete("content-length");
+  return new Request(url, { method: request.method, headers, body, signal: request.signal });
+}
+
+/**
+ * A Bedrock request for another model, which goes in the path. A request signed with SigV4 is
+ * signed again, since the signature covers the path.
+ */
+async function withBedrockModel(request: Request, model: string): Promise<Request> {
+  if (!isBedrockModel(model)) {
+    throw new TomikoError(
+      `TOMIKO_MODEL=${model} is not a Bedrock model id: this request goes to Amazon Bedrock, which names models ` +
+        `like us.anthropic.claude-haiku-4-5-20251001-v1:0 or amazon.nova-lite-v1:0.`,
+    );
+  }
+  const url = new URL(request.url);
+  const match = BEDROCK_PATH.exec(url.pathname);
+  if (!match) return request;
+  const [, current, kind] = match;
+  // InvokeModel bodies are each model family's own; only Converse speaks for all of them.
+  if (kind!.startsWith("invoke") && bedrockFamily(decodeURIComponent(current!)) !== bedrockFamily(model)) {
+    throw new TomikoError(
+      `TOMIKO_MODEL=${model} can't answer this request: InvokeModel bodies are in each model family's own format, ` +
+        `and this one is for ${decodeURIComponent(current!)}. Use Bedrock's Converse API to compare models of different families.`,
+    );
+  }
+  url.pathname = url.pathname.replace(BEDROCK_PATH, `/model/${encodeURIComponent(model)}/${kind}`);
+  const body = request.body ? new Uint8Array(await request.clone().arrayBuffer()) : undefined;
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  const signature = parseAuthorization(headers.get("authorization"));
+  if (signature) {
+    const credentials = findCredentials(process.env, signature.accessKeyId);
+    if (!credentials) {
+      throw new TomikoError(
+        `To send this request to ${model}, tomiko signs it again, and the AWS credentials it was signed with ` +
+          `(access key ${maskKeyId(signature.accessKeyId)}) are not in AWS_ACCESS_KEY_ID or ~/.aws/credentials. ` +
+          `Set them there, or use a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK.`,
+      );
+    }
+    sign({ method: request.method, url: url.toString(), headers, body, credentials, region: signature.region, service: signature.service, signedHeaders: signature.signedHeaders });
+  }
   return new Request(url, { method: request.method, headers, body, signal: request.signal });
 }
 
@@ -104,6 +151,9 @@ function liveHeaders(headers: Headers): Headers {
 function isTransient(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
+
+/** Responses recorded as they stream: SSE, and Bedrock's AWS event streams. */
+const streaming = (contentType: string) => isEventStream(contentType) || isAwsEventStream(contentType);
 
 function withUrl(response: Response, url: string): Response {
   Object.defineProperty(response, "url", { value: url });
@@ -228,7 +278,7 @@ export class Cassette {
       const { request } = interaction;
       // Assertions see what the caller saw.
       const response = rewritten ?? interaction.response;
-      const { model: responseModel, usage } = extractUsage(response.body);
+      const { model: responseModel, usage } = extractUsage(response.body, response.headers);
       const model = responseModel ?? requestModel(request);
       const price = model && usage ? priceFor(model, this.pricing) : undefined;
       return {
@@ -342,7 +392,7 @@ export class Cassette {
     if (f.name !== "rate_limit" && f.name !== "overloaded" && f.name !== "server_error") {
       throw new TomikoError(`Fault "${f.name}" cannot fail a request.`);
     }
-    const { status, body } = errorResponse(f.name, interaction.meta.provider);
+    const { status, body, headers } = errorResponse(f.name, interaction.meta.provider);
     interaction.response = {
       status,
       headers: {
@@ -350,6 +400,7 @@ export class Cassette {
         // SDKs wait this long before retrying; retry-after-ms is the precise one.
         "retry-after-ms": String(f.retryAfterMs),
         "retry-after": String(f.retryAfterMs / 1000),
+        ...headers,
       },
       body: { type: "json", value: body },
     };
@@ -365,7 +416,7 @@ export class Cassette {
     if (!key) {
       const clean = this.guard ? withoutSecrets(request, this.guard) : request;
       const body = stripPaths(clean.body, isGemini(clean.body) ? [...this.ignore, ...GEMINI_CALL_IDS] : this.ignore);
-      key = { url: clean.url, body, canonical: canonical(body) };
+      key = { url: matchUrl(clean.url), body, canonical: canonical(body) };
       this.keys.set(request, key);
     }
     return key;
@@ -445,13 +496,23 @@ export class Cassette {
         `Not saved: ${res.status} from ${recordedRequest.method} ${recordedRequest.url} is a transient error, ` +
           `so it would replay forever. Set \`recordErrors: true\` to keep it, or simulate it with \`faults\`.`,
       );
-      if (res.body && isEventStream(contentType)) return { response: withUrl(new Response(res.body, init), request.url), entry };
+      if (res.body && streaming(contentType)) return { response: withUrl(new Response(res.body, init), request.url), entry };
     }
 
-    if (isEventStream(contentType) && res.body) {
-      const chunks: string[] = [];
-      interaction.response.body = { type: "sse", chunks };
-      const { stream, settle } = recordStream(res.body, chunks);
+    if (streaming(contentType) && res.body) {
+      let sink;
+      if (isEventStream(contentType)) {
+        const chunks: string[] = [];
+        interaction.response.body = { type: "sse", chunks };
+        sink = textSink(chunks);
+      } else {
+        // Bedrock's binary frames are decoded as they arrive, so assertions see the stream so far.
+        const events: StreamEvent[] = [];
+        interaction.response.body = { type: "eventstream", events };
+        // A stream that turns out not to be valid frames is kept as the bytes it was.
+        sink = eventSink(events, (bytes) => (interaction.response.body = encodeBody(bytes, contentType)));
+      }
+      const { stream, settle } = recordStream(res.body, sink);
       this.pending.push(() =>
         settle().then(
           (endedAt) => this.finish(interaction, started, endedAt),
@@ -469,7 +530,7 @@ export class Cassette {
   }
 
   private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {
-    const { model, usage } = extractUsage(interaction.response.body);
+    const { model, usage } = extractUsage(interaction.response.body, interaction.response.headers);
     interaction.meta = {
       ...(interaction.meta.judge ? { judge: true } : {}),
       provider: interaction.meta.provider,

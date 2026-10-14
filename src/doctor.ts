@@ -4,6 +4,7 @@
  * use. Each finding comes with what it costs one live run of the tests, which is also what the
  * same pattern costs your app per conversation like them.
  */
+import { readableBody } from "./converse.js";
 import { readContent } from "./inspect.js";
 import { canonical } from "./match.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
@@ -159,8 +160,9 @@ function limitOf(body: Obj): number | undefined {
 
 function read(path: string, file: CassetteFile, pricing: PricingTable): Request[] {
   return file.interactions.map((interaction, i) => {
-    const body = isObj(interaction.request.body) ? interaction.request.body : {};
-    const { model: answered, usage } = extractUsage(interaction.response.body);
+    const readable = readableBody(interaction.request);
+    const body = isObj(readable) ? readable : {};
+    const { model: answered, usage } = extractUsage(interaction.response.body, interaction.response.headers);
     const model = answered ?? interaction.meta.model ?? requestModel(interaction.request);
     const price = model ? priceFor(model, pricing) : undefined;
     return {

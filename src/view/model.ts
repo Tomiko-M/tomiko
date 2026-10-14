@@ -1,8 +1,9 @@
+import { readableBody } from "../converse.js";
 import { readContent, stopReason } from "../inspect.js";
 import { canonical } from "../match.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
 import type { CassetteFile, Interaction, PricingTable, RecordedBody, ToolCall, Usage } from "../types.js";
-import { addUsage, detectProvider, emptyUsage, extractUsage, requestModel } from "../usage.js";
+import { addUsage, detectProvider, emptyUsage, extractUsage, isStreamed, requestModel } from "../usage.js";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -206,6 +207,8 @@ function rawBody(body: RecordedBody): unknown {
       return body.value;
     case "sse":
       return body.chunks.join("");
+    case "eventstream":
+      return body.events;
     case "base64":
       return `(binary, ${Math.round((body.value.length * 3) / 4)} bytes)`;
     case "empty":
@@ -222,8 +225,8 @@ function sharedPrefix(previous: unknown[], current: unknown[]): number {
 
 function interactionView(interaction: Interaction, index: number, previous: RequestView | undefined, pricing: PricingTable) {
   const { request, response, meta } = interaction;
-  const req = requestView(request.body);
-  const { model: responseModel, usage } = extractUsage(response.body);
+  const req = requestView(readableBody(request));
+  const { model: responseModel, usage } = extractUsage(response.body, response.headers);
   const model = responseModel ?? meta.model ?? requestModel(request);
   const price = model && usage ? priceFor(model, pricing) : undefined;
   const earlier = previous ? sharedPrefix(previous.rawMessages, req.rawMessages) : 0;
@@ -250,7 +253,7 @@ function interactionView(interaction: Interaction, index: number, previous: Requ
     earlierMessages: earlier,
     repeatsPreviousResponse,
     messages: req.messages.slice(fresh),
-    response: { ...readContent(response.body), stopReason: stopReason(response.body), streamed: response.body.type === "sse" },
+    response: { ...readContent(response.body), stopReason: stopReason(response.body), streamed: isStreamed(response.body) },
     rawRequest: request.body,
     rawResponse: rawBody(response.body),
   };

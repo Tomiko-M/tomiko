@@ -26,3 +26,13 @@ export function change(before: number, after: number): string | undefined {
   if (Number(rounded) === 0) return undefined;
   return pct > 0 ? `+${rounded}%` : `−${rounded.replace("-", "")}%`;
 }
+
+/**
+ * A model id for tables and headers: a Bedrock id without its ARN, date and version,
+ * `us.anthropic.claude-haiku-4-5-20251001-v1:0` → `us.anthropic.claude-haiku-4-5`. Other ids as they are.
+ */
+export function shortModel(model: string): string {
+  const id = model.replace(/^arn:aws[a-z-]*:bedrock:[^/]*\/(?!.*\/)/, "");
+  if (!/^(?:[a-z-]+\.)?[a-z][a-z0-9]*\.[a-z]/i.test(id) || /^(gpt|o\d|gemini|claude)/i.test(id)) return model;
+  return id.replace(/-v\d+:\d+$|-\d+:\d+$/, "").replace(/-\d{8}$/, "");
+}

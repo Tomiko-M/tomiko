@@ -1,3 +1,4 @@
+import { frameLength, isAwsEventStream } from "./eventstream.js";
 import { isEventStream } from "./http.js";
 
 /** What a fault's `when` filter sees of each request. */
@@ -158,11 +159,26 @@ const openaiError = (type: string, code: string | null, message: string) => ({
   error: { message: `${message} (${SIMULATED})`, type, param: null, code },
 });
 
+/**
+ * Bedrock's errors: a message in the body, the type in `x-amzn-errortype`, from which the AWS SDK
+ * builds its `ThrottlingException`, `ServiceUnavailableException`…
+ */
+const bedrockError = (status: number, type: string, message: string) => ({
+  status,
+  body: { message: `${message} (${SIMULATED})` },
+  headers: { "x-amzn-errortype": `${type}:http://internal.amazon.com/coral/com.amazon.bedrock/` },
+});
+
 /** Status and body each provider sends for this kind of failure, so SDKs map it to their usual error. */
 export function errorResponse(
   name: "rate_limit" | "overloaded" | "server_error",
   provider: string | undefined,
-): { status: number; body: unknown } {
+): { status: number; body: unknown; headers?: Record<string, string> } {
+  if (provider === "bedrock") {
+    if (name === "rate_limit") return bedrockError(429, "ThrottlingException", "Too many requests, please wait before trying again.");
+    if (name === "overloaded") return bedrockError(503, "ServiceUnavailableException", "Bedrock is unable to process your request.");
+    return bedrockError(500, "InternalServerException", "The server encountered an internal error while processing the request.");
+  }
   if (provider === "anthropic") {
     if (name === "rate_limit") return { status: 429, body: anthropicError("rate_limit_error", "Rate limited") };
     if (name === "overloaded") return { status: 529, body: anthropicError("overloaded_error", "Overloaded") };
@@ -204,8 +220,10 @@ export function delay(ms: number, signal: AbortSignal | null): Promise<void> {
 /** Passes the body through until the cut point, then fails the stream like a dropped connection. */
 export function cutResponse(response: Response, afterEvents: number): Response {
   if (!response.body) return response;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (isAwsEventStream(contentType)) return cutFrames(response, afterEvents);
   const reader = response.body.getReader();
-  const sse = isEventStream(response.headers.get("content-type") ?? "");
+  const sse = isEventStream(contentType);
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const buffered: Uint8Array[] = [];
@@ -238,6 +256,39 @@ export function cutResponse(response: Response, afterEvents: number): Response {
     },
   });
 
+  const cut = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  Object.defineProperty(cut, "url", { value: response.url });
+  return cut;
+}
+
+/** An AWS event stream, cut after `afterEvents` whole frames. */
+function cutFrames(response: Response, afterEvents: number): Response {
+  const reader = response.body!.getReader();
+  let pending: Uint8Array = new Uint8Array(0);
+  let frames = 0;
+  const drop = () => new TypeError("terminated", { cause: new Error(`other side closed (${SIMULATED})`) });
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (frames >= afterEvents) {
+        void reader.cancel();
+        return controller.error(drop());
+      }
+      const { done, value } = await reader.read();
+      if (done) return controller.close(); // ended before the cut point
+      pending = concat([pending, value]);
+      // Pass on whole frames only, up to the cut.
+      let end = 0;
+      for (let length = frameLength(pending, end); length !== undefined && end + length <= pending.length && frames < afterEvents; length = frameLength(pending, end)) {
+        end += length;
+        frames++;
+      }
+      if (end > 0) controller.enqueue(pending.slice(0, end));
+      pending = pending.slice(end);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
   const cut = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   Object.defineProperty(cut, "url", { value: response.url });
   return cut;

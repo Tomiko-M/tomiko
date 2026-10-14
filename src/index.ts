@@ -3,6 +3,7 @@ import { activate, assertNoActiveCassette, dispatch, mergeOptions, runtime } fro
 import type { TomikoOptions } from "./types.js";
 
 export { Cassette, resolveMode } from "./cassette.js";
+export { awsRequestHandler, type AwsHandlerOptions, type AwsHttpRequest, type AwsHttpResponse } from "./aws.js";
 export {
   diffCassettes,
   summarizeDiff,

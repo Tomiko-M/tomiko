@@ -3,11 +3,13 @@
  * parse, refusing, stopping at the token limit, saying nothing. The answer is rebuilt in the
  * provider's own format, streamed or not, so SDKs and agents meet it the way they would live.
  */
+import { readableBody } from "./converse.js";
 import { TomikoError } from "./errors.js";
+import { EVENT_STREAM } from "./eventstream.js";
 import type { Fault } from "./faults.js";
 import { readContent } from "./inspect.js";
-import type { RecordedBody, RecordedRequest, RecordedResponse, Usage } from "./types.js";
-import { extractUsage, parseSseData } from "./usage.js";
+import type { RecordedBody, RecordedRequest, RecordedResponse, StreamEvent, Usage } from "./types.js";
+import { extractUsage, requestModel, streamEvents } from "./usage.js";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -16,7 +18,9 @@ const str = (v: unknown): string | undefined => (typeof v === "string" ? v : und
 export type Misbehavior = Extract<Fault, { name: "hallucinated_tool" | "broken_arguments" | "refusal" | "max_tokens" | "empty_answer" }>;
 export const MISBEHAVIORS = new Set<string>(["hallucinated_tool", "broken_arguments", "refusal", "max_tokens", "empty_answer"]);
 
-type Format = "anthropic" | "chat" | "responses" | "gemini";
+type Format = "anthropic" | "chat" | "responses" | "gemini" | "converse";
+/** How the answer travels: whole, as SSE, or as Bedrock's AWS event stream. */
+type Transport = "json" | "sse" | "eventstream";
 
 interface Call {
   name: string;
@@ -49,15 +53,17 @@ function formatOf(body: RecordedBody): Format | undefined {
     if (o.object === "response" || String(o.type).startsWith("response.")) return "responses";
     if (Array.isArray(o.candidates)) return "gemini";
     if (Array.isArray(o.choices)) return "chat";
+    if ((isObj(o.output) && isObj(o.output.message)) || typeof o.stopReason === "string") return "converse";
+    if (["messageStart", "contentBlockStart", "contentBlockDelta", "messageStop", "metadata"].some((k) => isObj(o[k]))) return "converse";
     return undefined;
   };
   if (body.type === "json") return of(body.value);
-  if (body.type === "sse") return parseSseData(body.chunks).map(of).find(Boolean);
-  return undefined;
+  return streamEvents(body).map(of).find(Boolean);
 }
 
 /** Tool names the request offers the model. */
-function offeredTools(body: unknown): string[] {
+function offeredTools(request: RecordedRequest): string[] {
+  const body = readableBody(request);
   if (!isObj(body) || !Array.isArray(body.tools)) return [];
   return body.tools.filter(isObj).flatMap((t) => {
     const declarations = t.functionDeclarations ?? t.function_declarations;
@@ -67,11 +73,12 @@ function offeredTools(body: unknown): string[] {
   }).filter(Boolean);
 }
 
-function baseOf(body: RecordedBody, request: RecordedRequest): Base {
-  const { model, usage } = extractUsage(body);
-  const first = body.type === "json" ? body.value : body.type === "sse" ? parseSseData(body.chunks)[0] : undefined;
+function baseOf(response: RecordedResponse, request: RecordedRequest): Base {
+  const body = response.body;
+  const { model, usage } = extractUsage(body, response.headers);
+  const first = body.type === "json" ? body.value : streamEvents(body)[0];
   const o = isObj(first) ? (isObj(first.message) ? first.message : isObj(first.response) ? first.response : first) : {};
-  const requested = isObj(request.body) ? str(request.body.model) : undefined;
+  const requested = requestModel(request);
   return {
     id: str(o.id) ?? str(o.responseId) ?? "tomiko_fault",
     model: model ?? requested ?? "unknown",
@@ -93,10 +100,11 @@ function broken(input: unknown): string {
   return json.length > 2 ? json.slice(0, Math.max(1, Math.ceil(json.length / 2))) : "{";
 }
 
-function answerFor(fault: Misbehavior, response: RecordedResponse, request: RecordedRequest, format: Format): Answer {
+function answerFor(fault: Misbehavior, response: RecordedResponse, request: RecordedRequest, format: Format, transport: Transport): Answer {
   const original = readContent(response.body);
-  const textArgs = format === "chat" || format === "responses";
-  const offered = offeredTools(request.body);
+  // Formats that send tool arguments as text, which can be cut in the middle of the JSON.
+  const textArgs = format === "chat" || format === "responses" || (format === "converse" && transport !== "json");
+  const offered = offeredTools(request);
   switch (fault.name) {
     case "hallucinated_tool": {
       let name = fault.tool ?? (offered[0] ? `${offered[0]}_v2` : "search");
@@ -131,15 +139,34 @@ function answerFor(fault: Misbehavior, response: RecordedResponse, request: Reco
 
 /* ------------------------------------------ writing ------------------------------------------ */
 
-const sse = (events: { event?: string; data: unknown }[]): RecordedBody => ({
+/** A streamed event, before it is put on the wire. */
+interface Piece {
+  event?: string;
+  data: unknown;
+}
+
+const sse = (events: Piece[]): RecordedBody => ({
   type: "sse",
   chunks: events.map((e) => `${e.event ? `event: ${e.event}\n` : ""}data: ${typeof e.data === "string" ? e.data : JSON.stringify(e.data)}\n\n`),
 });
 
-const callId = (format: Format, i: number) => (format === "anthropic" ? `toolu_tomiko_${i + 1}` : `call_tomiko_${i + 1}`);
+/**
+ * The same events in an AWS event stream: Bedrock's InvokeModel wraps the model's own events in
+ * `chunk`s; ConverseStream events are frames of their own type.
+ */
+const eventstream = (format: Format, events: Piece[]): RecordedBody => ({
+  type: "eventstream",
+  events: events.map((e): StreamEvent => (format === "converse" ? { event: e.event, data: e.data } : { event: "chunk", bytes: e.data })),
+});
+
+const callId = (format: Format, i: number) =>
+  format === "anthropic" ? `toolu_tomiko_${i + 1}` : format === "converse" ? `tooluse_tomiko_${i + 1}` : `call_tomiko_${i + 1}`;
 const args = (c: Call) => c.raw ?? JSON.stringify(c.input ?? {});
 
-function anthropic(base: Base, a: Answer, streamed: boolean): RecordedBody {
+/** Puts streamed events on the wire; undefined for an answer sent whole. */
+type Wire = ((events: Piece[]) => RecordedBody) | undefined;
+
+function anthropic(base: Base, a: Answer, wire: Wire): RecordedBody {
   const stop = { end: "end_turn", tool: "tool_use", max_tokens: "max_tokens", refusal: "refusal" }[a.stop];
   const usage = {
     input_tokens: base.usage.inputTokens,
@@ -153,8 +180,8 @@ function anthropic(base: Base, a: Answer, streamed: boolean): RecordedBody {
     ...a.calls.map((c, i) => ({ type: "tool_use" as const, id: callId("anthropic", i), name: c.name, input: c.input ?? {} })),
   ];
   const message = { id: base.id, type: "message", role: "assistant", model: base.model };
-  if (!streamed) return { type: "json", value: { ...message, content: blocks, stop_reason: stop, stop_sequence: null, usage } };
-  return sse([
+  if (!wire) return { type: "json", value: { ...message, content: blocks, stop_reason: stop, stop_sequence: null, usage } };
+  return wire([
     { event: "message_start", data: { type: "message_start", message: { ...message, content: [], stop_reason: null, stop_sequence: null, usage: { ...usage, output_tokens: 1 } } } },
     ...blocks.flatMap((block, index) => [
       { event: "content_block_start", data: { type: "content_block_start", index, content_block: block.type === "text" ? { type: "text", text: "" } : { ...block, input: {} } } },
@@ -173,7 +200,7 @@ function anthropic(base: Base, a: Answer, streamed: boolean): RecordedBody {
   ]);
 }
 
-function chat(base: Base, a: Answer, streamed: boolean): RecordedBody {
+function chat(base: Base, a: Answer, wire: Wire): RecordedBody {
   const finish = { end: "stop", tool: "tool_calls", max_tokens: "length", refusal: "stop" }[a.stop];
   const usage = {
     prompt_tokens: base.usage.inputTokens + base.usage.cacheReadTokens,
@@ -183,7 +210,7 @@ function chat(base: Base, a: Answer, streamed: boolean): RecordedBody {
   };
   const calls = a.calls.map((c, i) => ({ id: callId("chat", i), type: "function", function: { name: c.name, arguments: args(c) } }));
   const head = { id: base.id, created: base.created, model: base.model };
-  if (!streamed) {
+  if (!wire) {
     const message = {
       role: "assistant",
       content: a.refusal ? null : a.text || (calls.length > 0 ? null : ""),
@@ -195,7 +222,7 @@ function chat(base: Base, a: Answer, streamed: boolean): RecordedBody {
   const chunk = (delta: Obj, finish_reason: string | null = null) => ({
     data: { ...head, object: "chat.completion.chunk", choices: [{ index: 0, delta, logprobs: null, finish_reason }] },
   });
-  return sse([
+  return wire([
     chunk({ role: "assistant", content: "" }),
     ...(a.refusal ? [chunk({ refusal: a.refusal })] : a.text ? [chunk({ content: a.text })] : []),
     ...calls.flatMap((c, index) => [
@@ -208,7 +235,7 @@ function chat(base: Base, a: Answer, streamed: boolean): RecordedBody {
   ]);
 }
 
-function responses(base: Base, a: Answer, streamed: boolean): RecordedBody {
+function responses(base: Base, a: Answer, wire: Wire): RecordedBody {
   const cutShort = a.stop === "max_tokens";
   const status = cutShort ? "incomplete" : "completed";
   const usage = {
@@ -233,14 +260,14 @@ function responses(base: Base, a: Answer, streamed: boolean): RecordedBody {
     output,
     usage,
   };
-  if (!streamed) return { type: "json", value: response };
+  if (!wire) return { type: "json", value: response };
   let seq = 0;
   const event = (type: string, fields: Obj) => ({ event: type, data: { type, sequence_number: seq++, ...fields } });
   const pending = { ...response, status: "in_progress", output: [], usage: null };
-  return sse([
+  return wire([
     event("response.created", { response: pending }),
     event("response.in_progress", { response: pending }),
-    ...output.flatMap((item, output_index): { event?: string; data: unknown }[] => {
+    ...output.flatMap((item, output_index): Piece[] => {
       if (item.type === "function_call") {
         const call = item as (typeof calls)[number];
         return [
@@ -266,7 +293,7 @@ function responses(base: Base, a: Answer, streamed: boolean): RecordedBody {
   ]);
 }
 
-function gemini(base: Base, a: Answer, streamed: boolean): RecordedBody {
+function gemini(base: Base, a: Answer, wire: Wire): RecordedBody {
   const finishReason = { end: "STOP", tool: "STOP", max_tokens: "MAX_TOKENS", refusal: "SAFETY" }[a.stop];
   const parts = [...(a.text && !a.refusal ? [{ text: a.text }] : []), ...a.calls.map((c) => ({ functionCall: { name: c.name, args: c.input ?? {} } }))];
   // A blocked answer has no content at all.
@@ -282,19 +309,55 @@ function gemini(base: Base, a: Answer, streamed: boolean): RecordedBody {
     modelVersion: base.model,
     responseId: base.id,
   };
-  return streamed ? sse([{ data: value }]) : { type: "json", value };
+  return wire ? wire([{ data: value }]) : { type: "json", value };
 }
+
+/** Bedrock's Converse API. A refusal is an answer stopped by a content filter. */
+function converse(base: Base, a: Answer, wire: Wire): RecordedBody {
+  const stopReason = { end: "end_turn", tool: "tool_use", max_tokens: "max_tokens", refusal: "content_filtered" }[a.stop];
+  const usage = {
+    inputTokens: base.usage.inputTokens,
+    outputTokens: base.usage.outputTokens,
+    totalTokens: base.usage.inputTokens + base.usage.outputTokens + base.usage.cacheReadTokens + base.usage.cacheWriteTokens,
+    cacheReadInputTokens: base.usage.cacheReadTokens,
+    cacheWriteInputTokens: base.usage.cacheWriteTokens,
+  };
+  const uses = a.calls.map((c, i) => ({ toolUseId: callId("converse", i), name: c.name, input: c.input ?? {}, raw: args(c) }));
+  if (!wire) {
+    const content = [...(a.text ? [{ text: a.text }] : []), ...uses.map(({ raw: _raw, ...toolUse }) => ({ toolUse }))];
+    return { type: "json", value: { output: { message: { role: "assistant", content } }, stopReason, usage, metrics: { latencyMs: 0 } } };
+  }
+  const blocks: Piece[][] = [
+    ...(a.text ? [[{ event: "contentBlockDelta", data: { delta: { text: a.text }, contentBlockIndex: 0 } }]] : []),
+    ...uses.map((use, i) => {
+      const contentBlockIndex = i + (a.text ? 1 : 0);
+      return [
+        { event: "contentBlockStart", data: { start: { toolUse: { toolUseId: use.toolUseId, name: use.name } }, contentBlockIndex } },
+        { event: "contentBlockDelta", data: { delta: { toolUse: { input: use.raw } }, contentBlockIndex } },
+      ];
+    }),
+  ];
+  return wire([
+    { event: "messageStart", data: { role: "assistant" } },
+    ...blocks.flatMap((pieces, contentBlockIndex) => [...pieces, { event: "contentBlockStop", data: { contentBlockIndex } }]),
+    { event: "messageStop", data: { stopReason } },
+    { event: "metadata", data: { usage, metrics: { latencyMs: 0 } } },
+  ]);
+}
+
+const CONTENT_TYPE: Record<Transport, string> = { json: "application/json", sse: "text/event-stream", eventstream: EVENT_STREAM };
 
 /** The answer the caller gets instead of `response`, which stays in the cassette as it was. */
 export function misbehave(fault: Misbehavior, response: RecordedResponse, request: RecordedRequest): RecordedResponse {
   if (response.status >= 400) return response;
   const format = formatOf(response.body);
   if (!format) {
-    throw new TomikoError(`Fault "${fault.name}" can't rewrite this response: tomiko knows the answers of Anthropic, OpenAI and Gemini.`);
+    throw new TomikoError(`Fault "${fault.name}" can't rewrite this response: tomiko knows the answers of Anthropic, OpenAI, Gemini and Bedrock.`);
   }
-  const streamed = response.body.type === "sse";
-  const answer = answerFor(fault, response, request, format);
-  const base = baseOf(response.body, request);
-  const body = { anthropic, chat, responses, gemini }[format](base, answer, streamed);
-  return { status: 200, headers: { "content-type": streamed ? "text/event-stream" : "application/json" }, body };
+  const transport: Transport = response.body.type === "sse" ? "sse" : response.body.type === "eventstream" ? "eventstream" : "json";
+  const wire: Wire = transport === "sse" ? sse : transport === "eventstream" ? (events) => eventstream(format, events) : undefined;
+  const answer = answerFor(fault, response, request, format, transport);
+  const base = baseOf(response, request);
+  const body = { anthropic, chat, responses, gemini, converse }[format](base, answer, wire);
+  return { status: 200, headers: { "content-type": CONTENT_TYPE[transport] }, body };
 }

@@ -13,7 +13,25 @@ export type RecordedBody =
   | { type: "json"; value: unknown }
   | { type: "text"; value: string }
   | { type: "sse"; chunks: string[] }
+  /** An AWS event stream (Amazon Bedrock), decoded. */
+  | { type: "eventstream"; events: StreamEvent[] }
   | { type: "base64"; value: string };
+
+/** One frame of an AWS event stream, as a cassette stores it. */
+export interface StreamEvent {
+  /** `:event-type`: `messageStart`, `contentBlockDelta`, `metadata`… or `chunk` in an InvokeModel stream. */
+  event?: string;
+  /** `:exception-type` of an error sent in the middle of the stream, such as `throttlingException`. */
+  exception?: string;
+  /** The JSON payload. */
+  data?: unknown;
+  /** A `chunk`'s `bytes`, decoded: a piece of the model's own stream, for Claude an Anthropic event. */
+  bytes?: unknown;
+  /** Headers besides the standard ones, kept as they were. */
+  headers?: Record<string, string>;
+  /** A payload that isn't JSON, in base64. */
+  base64?: string;
+}
 
 export interface RecordedRequest {
   method: string;

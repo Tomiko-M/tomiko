@@ -9,7 +9,7 @@
 import { isAbsolute, relative } from "node:path";
 import { TomikoError } from "./errors.js";
 import { paint, type Paint } from "./terminal.js";
-import type { Interaction, RecordedRequest, SecretAction, SecretFinding, SecretsOptions, TomikoOptions } from "./types.js";
+import type { Interaction, RecordedRequest, SecretAction, SecretFinding, SecretsOptions, StreamEvent, TomikoOptions } from "./types.js";
 
 type Json = unknown;
 type Groups = Record<string, string | undefined>;
@@ -363,7 +363,7 @@ function jsonSites(part: string, value: Json, write: (text: string) => void, sit
 }
 
 /** Fields that streaming APIs spread over many events: text, tool arguments, reasoning. */
-const STREAMED = new Set(["text", "partial_json", "content", "arguments", "delta", "thinking", "refusal", "reasoning_content"]);
+const STREAMED = new Set(["text", "partial_json", "content", "arguments", "delta", "thinking", "refusal", "reasoning_content", "input", "generation", "outputText"]);
 
 interface SseLine {
   start: number;
@@ -396,7 +396,7 @@ function streamSites(chunks: string[], replace: (chunks: string[]) => void, site
     lines.push(line);
   }
 
-  const leaves: { event: number; path: string; key?: string; segment: Segment }[] = [];
+  const leaves: Leaf[] = [];
   let events = 0;
   for (const line of lines) {
     const event = line.event;
@@ -427,19 +427,7 @@ function streamSites(chunks: string[], replace: (chunks: string[]) => void, site
     });
   }
 
-  const counts = new Map<string, number>();
-  for (const leaf of leaves) counts.set(leaf.path, (counts.get(leaf.path) ?? 0) + 1);
-  const channels = new Map<string, Site>();
-  for (const leaf of leaves) {
-    if (leaf.key !== undefined && STREAMED.has(leaf.key) && (counts.get(leaf.path) ?? 0) > 1) {
-      const channel = channels.get(leaf.path) ?? { part: "response stream", path: leaf.path, key: leaf.key, segments: [] };
-      channel.segments.push(leaf.segment);
-      channels.set(leaf.path, channel);
-    } else {
-      sites.push({ part: "response stream", path: `event ${leaf.event} › ${leaf.path}`, key: leaf.key, segments: [leaf.segment] });
-    }
-  }
-  sites.push(...channels.values());
+  channelSites(leaves, sites);
 
   // Rewrites only the lines that changed and keeps the chunking of everything else, so a replay
   // still arrives in the same pieces.
@@ -453,6 +441,52 @@ function streamSites(chunks: string[], replace: (chunks: string[]) => void, site
       .filter((edit) => edit.text !== raw.slice(edit.start, edit.end));
     if (edits.length > 0) replace(rechunk(chunks, edits));
   };
+}
+
+interface Leaf {
+  event: number;
+  path: string;
+  key?: string;
+  segment: Segment;
+}
+
+/** A field streamed over several events is one site, so a secret split across them is found. */
+function channelSites(leaves: Leaf[], sites: Site[]): void {
+  const counts = new Map<string, number>();
+  for (const leaf of leaves) counts.set(leaf.path, (counts.get(leaf.path) ?? 0) + 1);
+  const channels = new Map<string, Site>();
+  for (const leaf of leaves) {
+    if (leaf.key !== undefined && STREAMED.has(leaf.key) && (counts.get(leaf.path) ?? 0) > 1) {
+      const channel = channels.get(leaf.path) ?? { part: "response stream", path: leaf.path, key: leaf.key, segments: [] };
+      channel.segments.push(leaf.segment);
+      channels.set(leaf.path, channel);
+    } else {
+      sites.push({ part: "response stream", path: `event ${leaf.event} › ${leaf.path}`, key: leaf.key, segments: [leaf.segment] });
+    }
+  }
+  sites.push(...channels.values());
+}
+
+/** The strings in a Bedrock event stream, which a cassette stores decoded, so edits go straight in. */
+function awsStreamSites(events: StreamEvent[], sites: Site[]): void {
+  const leaves: Leaf[] = [];
+  events.forEach((event, i) => {
+    for (const field of ["data", "bytes"] as const) {
+      if (event[field] === undefined) continue;
+      walk(event[field] as Json, "", undefined, (text) => (event[field] = text), (text, path, key, set) => {
+        leaves.push({ event: i + 1, path, key, segment: { text, write: set } });
+      });
+    }
+    const text = event.base64 === undefined ? undefined : decodeText(event.base64);
+    if (text !== undefined) {
+      sites.push({
+        part: "response stream",
+        path: `event ${i + 1}`,
+        segments: [{ text, write: (value) => (event.base64 = Buffer.from(value, "utf8").toString("base64")) }],
+      });
+    }
+  });
+  channelSites(leaves, sites);
 }
 
 /** Applies `edits` to the concatenated chunks, keeping every chunk boundary outside an edit. */
@@ -517,6 +551,9 @@ function interactionSites(interaction: Interaction): Sites {
       break;
     case "sse":
       commit = streamSites(body.chunks, (chunks) => (body.chunks = chunks), sites);
+      break;
+    case "eventstream":
+      awsStreamSites(body.events, sites);
       break;
     case "base64": {
       const text = decodeText(body.value);
