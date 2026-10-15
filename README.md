@@ -16,7 +16,7 @@
 **The first run records real LLM responses. Every run after replays them.**<br>
 Agent tests that run offline in milliseconds, cost nothing, and give the same answer every time.
 
-[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Re-record](#see-what-the-model-does-differently) · [Models](#try-a-cheaper-model) · [Costs](#find-where-you-overpay) · [Secrets](#keep-keys-out-of-git) · [Reference](#reference)
+[Quick start](#quick-start) · [Assertions](#assert-what-your-agent-did) · [Failures](#test-the-failure-paths) · [Viewer](#see-every-run) · [Re-record](#see-what-the-model-does-differently) · [Models](#try-a-cheaper-model) · [Costs](#find-where-you-overpay) · [Secrets](#keep-keys-out-of-git) · [Bedrock](#amazon-bedrock) · [Reference](#reference)
 
 </div>
 
@@ -117,8 +117,8 @@ or the answer. Request headers are never stored.
 <td valign="top">
 
 **Works with your stack**<br>
-Anthropic, OpenAI, Gemini, Vercel AI SDK, LangChain.js, plain `fetch`. Any test runner. No
-dependencies.
+Anthropic, OpenAI, Gemini, Amazon Bedrock, Vercel AI SDK, LangChain.js, plain `fetch`. Any test
+runner. No dependencies.
 
 </td>
 </tr>
@@ -377,8 +377,8 @@ Nothing was written to __cassettes__/agent.test.ts/reads-the-config.json. To sav
   · secrets: { allow: [...] }   for values that are not real secrets
 ```
 
-It knows 20 key formats (Anthropic, OpenAI, Google, GitHub, AWS, Stripe, Slack, Hugging Face,
-Groq, xAI, private keys, JWTs and more), the values of your own environment variables named like
+It knows more than 30 key formats (Anthropic, OpenAI, Google, GitHub, AWS, Stripe, Slack, Hugging
+Face, LangSmith, Pinecone, Tavily, private keys, JWTs and more), the values of your own environment variables named like
 secrets (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`), whatever their format, and values of
 fields such as `password` or `client_secret`. A key the model spelled out over several streamed
 events is found too. Placeholders like `sk-ant-xxxx` and documentation examples are not flagged.
@@ -392,6 +392,54 @@ It exits with 1 when it finds any, so it can guard CI or a pre-commit hook.
   <img alt="tomiko scan listing a GitHub token, an Anthropic API key that matches the ANTHROPIC_API_KEY environment variable, and a password in a database URL, two of them already committed" src="docs/scan-light.png" width="100%">
 </picture>
 
+## Amazon Bedrock
+
+Claude, Amazon Nova, Llama and every other model on Bedrock, through the AWS SDK, Anthropic's
+Bedrock SDK, the AI SDK or LangChain. Converse and InvokeModel, whole or streamed. Bedrock streams
+in binary frames; cassettes keep them as readable events, so they diff and review like any other
+recording, and replays send them back as frames.
+
+Anthropic's Bedrock SDK and the AI SDK use `fetch` and need nothing. The AWS SDK talks to Bedrock
+over HTTP/2 on its own, so give its client tomiko's request handler, which sends its requests
+through the active cassette and to the network otherwise:
+
+```ts
+import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
+import { awsRequestHandler } from "tomiko";
+
+export const bedrock = new BedrockRuntimeClient({ region: "us-east-1", requestHandler: awsRequestHandler });
+// LangChain: new ChatBedrockConverse({ model, client: bedrock })
+```
+
+With Converse, every model on Bedrock answers the same API, so `tomiko matrix` compares model
+families side by side, with one AWS account:
+
+```sh
+npx tomiko matrix --models us.anthropic.claude-haiku-4-5-20251001-v1:0,us.amazon.nova-pro-v1:0,us.meta.llama4-maverick-17b-instruct-v1:0,us.amazon.nova-lite-v1:0
+```
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/bedrock-matrix-dark.png">
+  <img alt="tomiko matrix on Amazon Bedrock comparing Claude Sonnet with Claude Haiku, Amazon Nova Pro, Llama 4 Maverick and Nova Lite: tests passed, cost of a run, time and behavior; Nova Pro passes every test at 4 times less" src="docs/bedrock-matrix-light.png" width="100%">
+</picture>
+
+- **Replays need no AWS access,** but the SDKs sign every request before sending it, so give them
+  any credentials on CI: `AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1`.
+  A recording made in one region replays in any other.
+- **`matrix` signs each request again** for the model it tries, since the signature covers the
+  path the model is in: with the credentials that signed it, found in `AWS_ACCESS_KEY_ID` or
+  `~/.aws/credentials`, or with nothing to do under a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`).
+  InvokeModel bodies are each model family's own, so compare families through Converse.
+- **Faults** answer in Bedrock's format: `fault.rateLimit()` is a `ThrottlingException` the AWS SDK
+  throws and retries, `overloaded` a `ServiceUnavailableException`, and the model's misbehavior
+  is rewritten in Converse or in the model's own events. The AWS SDK waits 0.1 to 1 second
+  between retries whatever the answer says.
+- **The judge** can be a Bedrock model too: `toMeet(criteria, { model: "us.amazon.nova-pro-v1:0" })`,
+  through Converse, with `AWS_BEARER_TOKEN_BEDROCK` or your AWS credentials and `AWS_REGION`.
+- **Prices:** Claude costs what it costs from Anthropic (the regional endpoints of newer Claude
+  models add 10%); Amazon Nova, DeepSeek-R1, gpt-oss-120b and Llama 4 Maverick are built in. Model
+  ids, cross-region inference profiles (`us.`, `eu.`, `global.`) and ARNs all find their price.
+
 ## Works with
 
 | | Tested | Setup |
@@ -399,13 +447,16 @@ It exits with 1 when it finds any, so it can guard CI or a pre-commit hook.
 | **Anthropic SDK** | messages, streaming, tools, errors and retries | none ¹ |
 | **OpenAI SDK** | Chat Completions, Responses, streaming, tools, retries | none ¹ |
 | **Google Gen AI SDK** | `generateContent` with function calls, streaming, errors | none |
-| **Vercel AI SDK** | `generateText` tool loops (Anthropic, OpenAI, Google), `streamText` | none |
-| **LangChain.js** | `ChatAnthropic`, `ChatOpenAI`, bound tools | none ² |
+| **AWS SDK (Bedrock)** | Converse, ConverseStream, InvokeModel and its stream, throttling and retries | `requestHandler` ³ |
+| **Anthropic Bedrock SDK** | messages, streaming, misbehavior faults | none ¹ |
+| **Vercel AI SDK** | `generateText` tool loops (Anthropic, OpenAI, Google, Bedrock), `streamText` | none |
+| **LangChain.js** | `ChatAnthropic`, `ChatOpenAI`, `ChatBedrockConverse`, bound tools | none ² |
 | **Anything on `fetch`** | | none |
 
 <sub>¹ For a client created once at module load, pass `fetch` from `tomiko`, see
 [below](#clients-created-before-a-test). ² If the model may be called before any test runs, pass
-`fetch` the same way.</sub>
+`fetch` the same way; `ChatBedrockConverse` takes an AWS SDK client. ³ `awsRequestHandler`, see
+[Amazon Bedrock](#amazon-bedrock).</sub>
 
 Each row is covered by tests that record against a fake API, replay offline, and require identical
 results.
@@ -454,8 +505,13 @@ Identical requests are answered in the order they were recorded. A missing casse
 test that actually sends a request.
 
 Transient errors (408, 429 and 5xx) are passed through while recording but not saved, so an outage
-during a recording run can't replay forever; the SDK's retry is what gets recorded. To keep them,
-set `recordErrors: true`, or better, simulate them with [`faults`](#test-the-failure-paths).
+during a recording run can't replay forever; the SDK's retry is what gets recorded. Authentication
+errors (401, 403) aren't saved either, so a run without a key doesn't keep failing once it has one.
+To keep them, set `recordErrors: true`, or better, simulate them with [`faults`](#test-the-failure-paths).
+
+A stream your code leaves early, or that a fault cuts, is still recorded whole. Two test names that
+would share one cassette file (`2+2` and `2*2` both become `2-2`) are refused rather than overwrite
+each other.
 
 </details>
 
@@ -561,7 +617,7 @@ Leave volatile fields out of matching with `ignore: ["metadata.user_id", "messag
 | `fuzzy` | `false` | similarity threshold for near matches |
 | `ignore` | `[]` | request body paths left out of matching |
 | `faults` | `[]` | simulated failures |
-| `recordErrors` | `false` | also save transient errors (408, 429, 5xx) |
+| `recordErrors` | `false` | also save transient errors (408, 429, 5xx) and authentication errors (401, 403) |
 | `intercept` | every request | `(request) => boolean`; others go straight to the network |
 | `redact` | none | `(interaction) => interaction`, applied before saving |
 | `secrets` | `"fail"` | what to do with a secret in a recording: `"fail"`, `"redact"`, `"warn"`, or `false`; see secrets |
@@ -639,9 +695,10 @@ cost  · $0.0960 est. · $0.0800 saved by replay
 
 `formatSummary()` returns the same text as a string, plain unless you pass `{ color: true }`.
 
-Usage is read from Anthropic, OpenAI and Gemini responses, streamed or not, with cached and
-thinking tokens counted the way each provider bills them. List prices for current Anthropic,
-OpenAI and Gemini models are built in, as of October 2026, at their base context tier. A dated
+Usage is read from Anthropic, OpenAI, Gemini and Bedrock responses, streamed or not, with cached
+and thinking tokens counted the way each provider bills them, one-hour cache writes included. List
+prices for current Anthropic, OpenAI, Gemini and Amazon Bedrock models are built in, as of October
+2026, at their base context tier. A dated
 snapshot such as `gpt-5-2025-08-07` or `claude-haiku-4-5-20251001` has its model's price. Add or
 correct others with `pricing: { "my-model": { input: 2, output: 8, cacheRead: 0.2 } }`. A model
 with no price is reported, never counted as free, and `toCostLessThan` fails on it.
@@ -662,6 +719,7 @@ with no price is reported, never counted as free, and `toCostLessThan` fails on 
 | `TOMIKO_SHADOW` | read and write cassettes in this directory instead, at the same paths relative to the working directory, so a trial run leaves yours alone |
 | `TOMIKO_LOG` | a file each cassette appends one JSON line to when it closes: what it replayed and recorded, and what had no match |
 | `NO_COLOR`, `FORCE_COLOR` | color in the commands and in `printSummary()` |
+| `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`… | how a judge on Bedrock and `matrix` reach Bedrock; see [Amazon Bedrock](#amazon-bedrock) |
 
 The commands set the middle four for the test runs they start: `record` uses `TOMIKO_RECORD` and
 `TOMIKO_LOG`, `prune` uses `TOMIKO_LOG`, and `matrix` uses `TOMIKO_MODEL`, `TOMIKO_SHADOW` and
@@ -690,7 +748,9 @@ Plain JSON, so a changed prompt shows up in code review next to the code that ch
 ```
 
 - **Never stored:** request headers, including `x-api-key` and `authorization`.
-- **Response headers:** only `content-type`, `retry-after`, `request-id`, `x-request-id`.
+- **Response headers:** only `content-type`, `retry-after`, `request-id`, `x-request-id`, and
+  Bedrock's `x-amzn-requestid`, `x-amzn-errortype` and token counts (`x-amzn-bedrock-*`).
+- **Bedrock streams:** decoded into JSON events, the base64 of InvokeModel chunks included.
 - **Redacted:** query parameters such as `key`, `api_key`, `token`.
 - **Checked for secrets:** everything else, before it is saved; see [secrets](#keep-keys-out-of-git).
 - **Stored as is:** request and response bodies otherwise. Scrub personal data with `redact`.

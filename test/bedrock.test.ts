@@ -10,6 +10,7 @@ import {
 } from "@aws-sdk/client-bedrock-runtime";
 import AnthropicBedrock from "@anthropic-ai/bedrock-sdk";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
+import { ChatBedrockConverse } from "@langchain/aws";
 import { generateText, stepCountIs, streamText, tool } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -473,5 +474,37 @@ describe("AWS event streams", () => {
     await cassette("garbage", () => fetch(`${BEDROCK_URL}/model/x.y/converse-stream`, { method: "POST", body: "{}" }).then((r) => r.text()), { dir, fetch: api });
     const saved = JSON.parse(readFileSync(join(dir, "garbage.json"), "utf8"));
     expect(saved.interactions[0].response.body).toEqual({ type: "base64", value: Buffer.from("garbage that is not framed").toString("base64") });
+  });
+});
+
+describe("comparing Bedrock recordings", () => {
+  it("pairs requests to another model by their endpoint, the model aside", () => {
+    const at = (model: string, text: string): CassetteFile => ({
+      version: 1,
+      interactions: [
+        {
+          request: { method: "POST", url: `${BEDROCK_URL}/model/${encodeURIComponent(model)}/converse`, body: { messages: [{ role: "user", content: [{ text: "Hi" }] }] } },
+          response: { status: 200, headers: {}, body: { type: "json", value: converseResponse({ text }) } },
+          meta: { recordedAt: "", durationMs: 1 },
+        },
+      ],
+    });
+    const changed = diffCassettes("x.json", at(BEDROCK_CLAUDE, "Hello there."), at(BEDROCK_NOVA, "Hello there!"));
+    expect(changed.impact).toBe("wording");
+    expect(changed.requests[0]!.request?.model).toEqual({ before: BEDROCK_CLAUDE, after: BEDROCK_NOVA });
+  });
+});
+
+describe("LangChain on Bedrock", () => {
+  it("records ChatBedrockConverse through a client with tomiko's handler", async () => {
+    const dir = tmpDir();
+    const run = async () => {
+      const model = new ChatBedrockConverse({ model: BEDROCK_NOVA, region: "us-east-1", credentials, client: client() });
+      const answer = await model.invoke("Weather in Lisbon?");
+      return answer.content;
+    };
+    const live = await cassette("langchain", run, { dir, fetch: bedrock({ text: "Sunny in Lisbon." }) });
+    expect(live).toBe("Sunny in Lisbon.");
+    expect(await cassette("langchain", run, { dir, mode: "replay", fetch: offline })).toBe(live);
   });
 });

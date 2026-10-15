@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cassette, summary } from "../dist/index.js";
+import { createRequire } from "node:module";
+import { awsRequestHandler, cassette, summary } from "../dist/index.js";
 
 const dir = mkdtempSync(join(tmpdir(), "tomiko-smoke-"));
 const url = "https://api.anthropic.com/v1/messages";
@@ -50,5 +51,27 @@ const cli = (...args) => execFileSync(process.execPath, [new URL("../bin/tomiko.
 assert.match(cli("scan", dir), /✔ No secrets in 1 cassette/);
 const file = join(dir, "smoke.json");
 assert.match(cli("diff", file, file), /✔ 1 cassette re-recorded, and the model behaves the same/);
+
+// Amazon Bedrock through the AWS SDK's request handler: recorded, then replayed offline, from both builds.
+const converse = async () =>
+  new Response(JSON.stringify({ output: { message: { role: "assistant", content: [{ text: "Sunny." }] } }, stopReason: "end_turn", usage: { inputTokens: 9, outputTokens: 2 } }), {
+    headers: { "content-type": "application/json" },
+  });
+const ask = (handler) => async () => {
+  const { response } = await handler.handle({
+    method: "POST",
+    protocol: "https:",
+    hostname: "bedrock-runtime.us-east-1.amazonaws.com",
+    path: "/model/us.amazon.nova-lite-v1%3A0/converse",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: [{ text: "Weather?" }] }] }),
+  });
+  let text = "";
+  for await (const chunk of response.body) text += chunk;
+  return { status: response.statusCode, text: JSON.parse(text).output.message.content[0].text };
+};
+const { awsRequestHandler: cjsHandler } = createRequire(import.meta.url)("../dist/index.cjs");
+assert.deepEqual(await cassette("bedrock", ask(awsRequestHandler), { dir, fetch: converse }), { status: 200, text: "Sunny." });
+assert.deepEqual(await cassette("bedrock", ask(cjsHandler), { dir, mode: "replay", fetch: offline }), { status: 200, text: "Sunny." });
 
 console.log(`smoke ok on node ${process.version}`);

@@ -385,8 +385,10 @@ function endpoint(interaction: Interaction): string {
   try {
     const url = new URL(interaction.request.url);
     // Ids minted per run (`/v1/responses/resp_68a1…`) don't make another endpoint.
+    // The model in Gemini's and Bedrock's paths is compared as the model, not as another endpoint.
     const path = url.pathname
       .replace(/\/models\/[^/:]+:/, "/models/*:")
+      .replace(/\/model\/[^/]+\/(converse|converse-stream|invoke|invoke-with-response-stream)$/, "/model/*/$1")
       .split("/")
       .map((segment) => (GENERATED_ID.test(segment) ? "<id>" : segment))
       .join("/");

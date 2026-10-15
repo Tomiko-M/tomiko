@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+### Amazon Bedrock
+
+Claude, Amazon Nova, Llama and every other model on Bedrock, recorded and replayed like any other API.
+
+- Converse and ConverseStream, InvokeModel and its stream, through the AWS SDK, Anthropic's Bedrock SDK, the AI SDK and LangChain's `ChatBedrockConverse`
+- Bedrock's binary event streams are stored as readable JSON events (InvokeModel chunks as the model's own events) and replayed frame by frame
+- `awsRequestHandler`: the AWS SDK talks HTTP/2 on its own; give its client `requestHandler: awsRequestHandler` and tomiko sees its requests
+- Usage, cost and model from Converse, InvokeModel streams and Bedrock's token headers; prices for Claude on Bedrock, Amazon Nova, DeepSeek-R1, gpt-oss-120b and Llama 4 Maverick; model ids, inference profiles and ARNs all priced
+- `tomiko matrix` compares model families on Bedrock through Converse, with one AWS account, signing each request again for the model it tries
+- Faults in Bedrock's format (`ThrottlingException`, `ServiceUnavailableException`), stream cuts between frames, and misbehavior faults in Converse and InvokeModel streams
+- A judge on Bedrock: `toMeet(criteria, { model: "us.amazon.nova-pro-v1:0" })`
+- A recording made in one region replays in another; the viewer marks Bedrock requests; `diff`, `doctor` and the viewer read Converse requests
+
+### Fixes
+
+A full review of the project found 39 bugs; each fix comes with a test that failed before it.
+
+- **Recording:** a stream your code leaves early, or that a fault cuts, is recorded whole; a caller still reading when a cassette closes gets every chunk; concurrent requests are saved in the order they were sent; 401 and 403 answers aren't saved; two test names that would share one cassette file are refused
+- **Replay:** `AbortSignal` is honored, before the answer and mid-stream
+- **CLI:** `record`, `prune` and `matrix` run your tests from the package root with your package manager (pnpm, yarn, bun), so running them from a subdirectory no longer reaches the live API; `matrix` runs only the tests of the cassettes you give it, and its verdicts trust the exit code; `diff` fails on a path that doesn't exist and works before the first commit; a failing command no longer leaves its spinner turning
+- **doctor:** counts what tokens cost with the cache, doesn't take a retry for a duplicate, counts each token once
+- **Secrets:** a redacted recording matches on any machine; keys after `\n`, `%3D` or an escaped quote are found; values are redacted whole; demo credentials (`postgres:postgres@localhost`, `SecurePass123!`) are left alone; more than 30 key formats, Tavily, LangSmith, Pinecone, Google OAuth, Stripe webhooks and Discord webhooks among the new ones
+- **diff:** `--json` never prints a secret; trailing whitespace and ids minted per run aren't changes; long answers that differ in a few words are aligned
+- `toHaveUsedModel` matches the model the request asked for; one-hour Anthropic cache writes are priced at twice the input price; fault options given as `undefined` keep their defaults
+
 ## 0.2.0 (2026-10-13)
 
 ### Find the cheapest model that passes: `tomiko matrix`
