@@ -63,7 +63,20 @@ export const cassetteFrame = (i: number) => {
   return `[${reel}═${reel}]`;
 };
 
+/** Spinners turning now, so a failure or Ctrl-C can stop them and give the cursor back. */
+const turning = new Set<Spinner>();
+
+function onSignal(signal: NodeJS.Signals): void {
+  for (const spinner of turning) spinner.halt();
+  process.exit(signal === "SIGINT" ? 130 : 143);
+}
+
 export class Spinner {
+  /** Stops every spinner still turning, as when a command fails in the middle of one. */
+  static stopAll(): void {
+    for (const spinner of [...turning]) spinner.halt();
+  }
+
   private timer: ReturnType<typeof setInterval> | undefined;
   private frame = 0;
   private text = "";
@@ -80,9 +93,31 @@ export class Spinner {
     if (!this.animate) return this;
     this.stream.write("\x1b[?25l"); // hide the cursor while the reels turn
     process.once("exit", this.restoreCursor);
+    if (turning.size === 0) {
+      process.on("SIGINT", onSignal);
+      process.on("SIGTERM", onSignal);
+    }
+    turning.add(this);
     this.render();
+    // The reels never keep the process alive on their own.
     this.timer = setInterval(() => this.render(), 90);
+    this.timer.unref?.();
     return this;
+  }
+
+  /** Stops at once, clearing the line and giving the cursor back. */
+  halt(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = undefined;
+    this.stream.write("\r\x1b[2K");
+    this.restoreCursor();
+    process.removeListener("exit", this.restoreCursor);
+    turning.delete(this);
+    if (turning.size === 0) {
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    }
   }
 
   update(text: string): void {
@@ -97,11 +132,7 @@ export class Spinner {
     if (this.timer) {
       const left = minMs - (Date.now() - this.startedAt);
       if (left > 0) await new Promise((resolve) => setTimeout(resolve, left));
-      clearInterval(this.timer);
-      this.timer = undefined;
-      this.stream.write("\r\x1b[2K");
-      this.restoreCursor();
-      process.removeListener("exit", this.restoreCursor);
+      this.halt();
     }
     if (line !== undefined) this.stream.write(`${line}\n`);
   }
@@ -146,6 +177,9 @@ export interface Span {
  * Lays styled text out in lines of at most `columns` columns, breaking at spaces where it can.
  * Styles are applied per line, so a wrapped span never bleeds its color into the margin.
  */
+/** `text` padded with spaces to `columns` wide, counting wide characters as two. */
+export const padTo = (text: string, columns: number) => text + " ".repeat(Math.max(0, columns - width(text)));
+
 export function wrapSpans(spans: Span[], columns: number): string[] {
   const max = Math.max(columns, 10);
   const lines: Span[][] = [[]];

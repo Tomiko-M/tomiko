@@ -8,7 +8,7 @@ import { record } from "./commands/record.js";
 import { ask, execute } from "./commands/run.js";
 import { scan } from "./commands/scan.js";
 import { view } from "./commands/view.js";
-import { animationEnabled, colorEnabled, paint, type Paint } from "./terminal.js";
+import { animationEnabled, colorEnabled, paint, type Paint, Spinner } from "./terminal.js";
 
 export type { Io } from "./commands/common.js";
 
@@ -97,5 +97,12 @@ export async function main(argv: string[], io: Io = defaultIo()): Promise<number
     return 1;
   }
   if (!command.runs) args.positional.push(...args.rest.splice(0));
-  return command.run(args, io, p);
+  try {
+    return await command.run(args, io, p);
+  } catch (error) {
+    // A failure in the middle of a spinner would leave it turning, and the process with it.
+    Spinner.stopAll();
+    io.error(`  ${p.red("✖")} ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
 }

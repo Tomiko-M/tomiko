@@ -38,37 +38,81 @@ export function quote(word: string): string {
 }
 
 export type Runner = "vitest" | "jest" | "npm";
+type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
-/** The nearest package.json's test runner: Vitest or Jest run directly, anything else through `npm test`. */
-export function runner(cwd: string): Runner {
-  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
-    const file = join(dir, "package.json");
-    if (existsSync(file)) {
-      try {
-        const pkg = JSON.parse(readFileSync(file, "utf8")) as Record<string, Record<string, string> | undefined>;
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps.vitest) return "vitest";
-        if (deps.jest) return "jest";
-      } catch {
-        // Unreadable: fall back to npm test.
-      }
-      return "npm";
-    }
-    if (dirname(dir) === dir) return "npm";
+/** How each package manager runs a project's own binary, and its test script. */
+const EXEC: Record<PackageManager, string> = { npm: "npx", pnpm: "pnpm exec", yarn: "yarn", bun: "bunx" };
+const TEST_SCRIPT: Record<PackageManager, string> = { npm: "npm test", pnpm: "pnpm test", yarn: "yarn test", bun: "bun run test" };
+const LOCKFILES: [string, PackageManager][] = [
+  ["pnpm-lock.yaml", "pnpm"],
+  ["yarn.lock", "yarn"],
+  ["bun.lock", "bun"],
+  ["bun.lockb", "bun"],
+  ["package-lock.json", "npm"],
+];
+
+export interface Project {
+  /** The directory of the nearest package.json, where its tests run from. */
+  root: string;
+  runner: Runner;
+  packageManager: PackageManager;
+}
+
+function readPackage(file: string): Record<string, unknown> | undefined {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    return undefined;
   }
 }
 
 /**
- * The command that runs the tests: `--` and what follows it when given, otherwise the project's
- * runner, limited to `files` when the runner can take them.
+ * The project `cwd` is in: the nearest package.json, its test runner (Vitest or Jest, run
+ * directly; anything else through its test script), and its package manager, by the lockfile
+ * here or in a workspace above, so the runner is the project's own and not one npx downloads.
+ */
+export function project(cwd: string): Project {
+  let root: string | undefined;
+  let runner: Runner = "npm";
+  let declared: string | undefined;
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    if (root === undefined && existsSync(join(dir, "package.json"))) {
+      root = dir;
+      const pkg = readPackage(join(dir, "package.json"));
+      const deps = { ...(pkg?.dependencies as object), ...(pkg?.devDependencies as object) } as Record<string, string>;
+      runner = deps.vitest ? "vitest" : deps.jest ? "jest" : "npm";
+      if (typeof pkg?.packageManager === "string") declared = pkg.packageManager;
+    }
+    if (root !== undefined) {
+      const lock = LOCKFILES.find(([name]) => existsSync(join(dir, name)));
+      if (lock) return { root, runner, packageManager: lock[1] };
+      const pkg = dir === root ? undefined : readPackage(join(dir, "package.json"));
+      if (typeof pkg?.packageManager === "string") declared ??= pkg.packageManager;
+    }
+    if (dirname(dir) === dir) break;
+  }
+  const manager = (["pnpm", "yarn", "bun"] as const).find((m) => declared?.startsWith(`${m}@`)) ?? "npm";
+  return { root: root ?? resolve(cwd), runner, packageManager: manager };
+}
+
+export const runner = (cwd: string): Runner => project(cwd).runner;
+
+/** Where the test command runs: the project's root, or here for a command of your own. */
+export const testDir = (cwd: string, given: string[]) => (given.length > 0 ? resolve(cwd) : project(cwd).root);
+
+/**
+ * The command that runs the tests, from `testDir`: `--` and what follows it when given, otherwise
+ * the project's runner, limited to `files` when the runner can take them.
  */
 export function testCommand(cwd: string, given: string[], files: string[] = [], extra: string[] = []): string {
   if (given.length > 0) return given.map(quote).join(" ");
-  const tool = runner(cwd);
-  const args = [...files.map((f) => relative(cwd, f) || f), ...extra].map(quote).join(" ");
-  if (tool === "vitest") return `npx vitest run${args ? ` ${args}` : ""}`;
-  if (tool === "jest") return `npx jest${args ? ` ${args}` : ""}`;
-  return "npm test";
+  const { root, runner: tool, packageManager } = project(cwd);
+  const paths = files.map((f) => relative(root, f) || f);
+  const exec = EXEC[packageManager];
+  if (tool === "vitest") return [`${exec} vitest run`, ...[...paths, ...extra].map(quote)].join(" ");
+  // Jest reads file arguments as patterns: `app/(shop)` would match nothing.
+  if (tool === "jest") return [`${exec} jest`, ...(paths.length > 0 ? ["--runTestsByPath"] : []), ...[...paths, ...extra].map(quote)].join(" ");
+  return TEST_SCRIPT[packageManager];
 }
 
 /** Arguments that make the runner write its results as JSON to `file`, when it can. */
@@ -93,6 +137,8 @@ export function readReport(file: string): TestResults | undefined {
     const report = JSON.parse(readFileSync(file, "utf8")) as {
       numTotalTests?: number;
       numPassedTests?: number;
+      numPendingTests?: number;
+      numTodoTests?: number;
       testResults?: { name?: string; assertionResults?: { fullName?: string; title?: string; status?: string }[] }[];
     };
     const failed = (report.testResults ?? []).flatMap((suite) =>
@@ -100,7 +146,9 @@ export function readReport(file: string): TestResults | undefined {
         .filter((test) => test.status === "failed")
         .map((test) => `${basename(suite.name ?? "")} > ${test.fullName ?? test.title ?? "?"}`),
     );
-    return { total: report.numTotalTests ?? 0, passed: report.numPassedTests ?? 0, failed };
+    // Skipped tests neither pass nor fail.
+    const total = (report.numTotalTests ?? 0) - (report.numPendingTests ?? 0) - (report.numTodoTests ?? 0);
+    return { total, passed: report.numPassedTests ?? 0, failed };
   } catch {
     return undefined;
   }
@@ -108,10 +156,10 @@ export function readReport(file: string): TestResults | undefined {
 
 /** Runs a shell command, its output passed through, or kept (the last 64 KB) when quiet. */
 export function execute(cwd: string): NonNullable<Io["exec"]> {
-  return (command, env, { quiet }) =>
+  return (command, env, { quiet, cwd: dir }) =>
     new Promise<ExecResult>((done) => {
       const child = spawn(command, {
-        cwd,
+        cwd: dir ?? cwd,
         shell: true,
         env: { ...process.env, ...env },
         stdio: quiet ? ["ignore", "pipe", "pipe"] : "inherit",

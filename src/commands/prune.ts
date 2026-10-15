@@ -4,10 +4,10 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { LOG_ENV, readUsage } from "../control.js";
 import { plural } from "../format.js";
 import { loadCassette, saveCassette } from "../store.js";
-import { Spinner } from "../terminal.js";
+import { Spinner, padTo, width } from "../terminal.js";
 import { discoverCassettes } from "../view/discover.js";
 import { type Command, failure } from "./common.js";
-import { approve, conventionalTestFile, execute, testCommand } from "./run.js";
+import { approve, conventionalTestFile, execute, testCommand, testDir } from "./run.js";
 
 interface Plan {
   /** Cassettes no test opened, or opened without using any of their requests. */
@@ -68,7 +68,7 @@ export const prune: Command = {
 
       const command = testCommand(io.cwd, args.rest);
       const spinner = new Spinner(io.stream, p, io.animate).start(`Replaying your tests to see which recordings they use… ${p.dim(command)}`);
-      const result = await (io.exec ?? execute(io.cwd))(command, { TOMIKO_MODE: "replay", [LOG_ENV]: log }, { quiet: true });
+      const result = await (io.exec ?? execute(io.cwd))(command, { TOMIKO_MODE: "replay", [LOG_ENV]: log }, { quiet: true, cwd: testDir(io.cwd, args.rest) });
       await spinner.stop();
       if (result.code !== 0) {
         io.error(`  ${p.red("✖")} ${command} failed (exit ${result.code}), so tomiko can't tell which recordings your tests need.`);
@@ -109,10 +109,10 @@ export const prune: Command = {
       io.log(`  ${p.green("✔")} Replayed your tests: they use ${opened} of ${plural(cassettes.length, "cassette")}.`);
       io.log("");
       const shown = (file: string) => relative(io.cwd, file) || file;
-      const pad = Math.max(...[...plan.remove, ...plan.trim].map((x) => shown(x.file).length));
-      for (const r of plan.remove) io.log(`    ${p.red("−")} ${shown(r.file).padEnd(pad)}  ${p.dim(r.reason)}`);
+      const pad = Math.max(...[...plan.remove, ...plan.trim].map((x) => width(shown(x.file))));
+      for (const r of plan.remove) io.log(`    ${p.red("−")} ${padTo(shown(r.file), pad)}  ${p.dim(r.reason)}`);
       for (const t of plan.trim) {
-        io.log(`    ${p.yellow("~")} ${shown(t.file).padEnd(pad)}  ${p.dim(`${t.unused.length} of ${plural(t.size, "request")} unused: #${t.unused.map((i) => i + 1).join(", #")}`)}`);
+        io.log(`    ${p.yellow("~")} ${padTo(shown(t.file), pad)}  ${p.dim(`${t.unused.length} of ${plural(t.size, "request")} unused: #${t.unused.map((i) => i + 1).join(", #")}`)}`);
       }
       io.log("");
 

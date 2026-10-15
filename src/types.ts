@@ -61,6 +61,8 @@ export interface Usage {
 export interface InteractionMeta {
   /** A judge's request, made by `judge()` or `toMeet()`, not by the code under test. */
   judge?: boolean;
+  /** A fault that rewrote this answer for the caller when it was recorded; the answer is the real one. */
+  fault?: FaultName;
   provider?: string;
   model?: string;
   usage?: Usage;

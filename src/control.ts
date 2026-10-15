@@ -9,6 +9,8 @@ import { delimiter, join, relative, resolve, sep } from "node:path";
 /** What a cassette served in a run, one JSON line per cassette closed. */
 export interface UsageEntry {
   file: string;
+  /** The cassette's own file, when this run kept it in `TOMIKO_SHADOW` instead. */
+  source?: string;
   mode: string;
   /** The file existed when the cassette was opened. */
   exists: boolean;

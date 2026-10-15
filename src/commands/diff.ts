@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import {
   type CassetteDiff,
   diffCassettes,
@@ -12,7 +12,7 @@ import {
   type Totals,
 } from "../compare.js";
 import { change, duration, plural, shortModel, tokens, usd } from "../format.js";
-import { changedFiles, GitError, readAt, repoRoot, resolveRevision } from "../git.js";
+import { changedFiles, EMPTY_TREE, GitError, hasCommits, readAt, repoRoot, resolveRevision } from "../git.js";
 import { canonical, type DiffEntry } from "../match.js";
 import { maskJson, maskSecrets, secretGuard } from "../secrets.js";
 import { paint, type Paint, type Span, Spinner, wrapSpans } from "../terminal.js";
@@ -67,7 +67,12 @@ function delta(p: Paint, before: number, after: number): string {
   return after > before ? p.yellow(text) : p.green(text);
 }
 
-const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+/** At most `max` characters, never splitting an emoji or other character in two. */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text;
+}
 
 /* ------------------------------------- text and values ------------------------------------- */
 
@@ -396,14 +401,26 @@ export async function fromGit(io: Io, paths: string[], ref: string): Promise<Sou
   if (!root) {
     return "tomiko diff compares cassettes with a git revision, and this is not a git repository (or git is not installed). Compare two files instead: tomiko diff old.json new.json";
   }
-  const revision = await resolveRevision(io.cwd, ref);
-  const files = await changedFiles(io.cwd, ref, paths.length > 0 ? paths : [DEFAULT_PATHSPEC]);
+  // Before the first commit, every cassette is new: compared with git's empty tree.
+  const unborn = ref === "HEAD" && !(await hasCommits(io.cwd));
+  const revision = unborn ? { ref, short: "(no commits yet)" } : await resolveRevision(io.cwd, ref);
+  const base = unborn ? EMPTY_TREE : ref;
+  const files = await changedFiles(io.cwd, base, paths.length > 0 ? paths : [DEFAULT_PATHSPEC]);
   const pairs: Pair[] = [];
   for (const file of files.filter((f) => f.path.endsWith(".json"))) {
     const absolute = join(root, file.path);
-    const before = file.status === "added" ? undefined : parseCassette(await readAt(io.cwd, ref, file.path));
+    const before = file.status === "added" ? undefined : parseCassette(await readAt(io.cwd, base, file.path));
     const after = file.status === "deleted" ? undefined : parseCassette(await readFile(absolute, "utf8").catch(() => undefined));
     if (before || after) pairs.push({ path: relative(io.cwd, absolute), before, after });
+  }
+  // A path that is nowhere, now or at the revision, is a typo rather than a cassette with no changes.
+  for (const path of paths) {
+    const absolute = resolve(io.cwd, path);
+    if (await stat(absolute).then(() => true, () => false)) continue;
+    // Deleted since the revision: its cassettes are in the comparison, or the file is in git.
+    if (pairs.some((pair) => resolve(io.cwd, pair.path).startsWith(absolute))) continue;
+    if (!unborn && (await readAt(io.cwd, base, relative(root, absolute).split(sep).join("/"))) !== undefined) continue;
+    return `No such file or directory: ${path}`;
   }
   return { from: `${ref} ${revision.short}`, to: "working tree", base: { ref, commit: revision.short }, pairs };
 }

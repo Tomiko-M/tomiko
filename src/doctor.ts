@@ -5,7 +5,7 @@
  * same pattern costs your app per conversation like them.
  */
 import { readableBody } from "./converse.js";
-import { readContent } from "./inspect.js";
+import { readContent, stopReason } from "./inspect.js";
 import { canonical } from "./match.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
 import type { CassetteFile, Interaction, ModelPrice, PricingTable } from "./types.js";
@@ -73,6 +73,10 @@ interface Request {
   price?: ModelPrice;
   /** Input tokens the request was billed for, cached or not. */
   input: number;
+  /** Of those, read from the prompt cache. */
+  cached: number;
+  /** What its input cost, per token, cached and uncached together. */
+  rate: number;
   output: number;
   cost: number;
   system: string;
@@ -165,13 +169,17 @@ function read(path: string, file: CassetteFile, pricing: PricingTable): Request[
     const { model: answered, usage } = extractUsage(interaction.response.body, interaction.response.headers);
     const model = answered ?? interaction.meta.model ?? requestModel(interaction.request);
     const price = model ? priceFor(model, pricing) : undefined;
+    const input = usage ? usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens : 0;
+    const inputCost = usage && price ? costOf({ ...usage, outputTokens: 0 }, price) : 0;
     return {
       path,
       index: i + 1,
       interaction,
       model,
       price,
-      input: usage ? usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens : 0,
+      input,
+      cached: usage?.cacheReadTokens ?? 0,
+      rate: input > 0 && inputCost > 0 ? inputCost / input : (price?.input ?? 0) / 1e6,
       output: usage?.outputTokens ?? 0,
       cost: usage && price ? costOf(usage, price) : 0,
       system: systemOf(body),
@@ -191,7 +199,7 @@ const cachedPrice = (r: Request) => (r.price ? (r.price.cacheRead ?? r.price.inp
 const VOLATILE = /^[\s\d:.,\-+/TZ]*$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Consecutive requests whose system prompts differ only in a timestamp or id, which breaks caching. */
-function volatilePrompts(byCassette: Request[][], uncached: Set<Request>): Finding[] {
+function volatilePrompts(byCassette: Request[][], uncached: Set<Request>, repeated: Set<Request>): Finding[] {
   const findings: Finding[] = [];
   for (const requests of byCassette) {
     let waste = 0;
@@ -204,10 +212,13 @@ function volatilePrompts(byCassette: Request[][], uncached: Set<Request>): Findi
       const { pieces } = diffWords(a.system, b.system);
       const changed = pieces.filter((p) => p.op !== "=").map((p) => p.text.trim());
       if (changed.length === 0 || !changed.every((t) => VOLATILE.test(t))) continue;
-      // Everything the earlier request sent could have been read from the cache.
+      // Everything the earlier request sent could have been read from the cache; what was read
+      // from it anyway (the time sits after a cache breakpoint) costs nothing more.
       const prefix = Math.min(a.input, b.input);
-      waste += prefix * (inputPrice(b) - cachedPrice(b));
-      tokens += prefix;
+      const missed = Math.max(0, prefix - b.cached);
+      if (missed < prefix * 0.1) continue;
+      if (!repeated.has(b)) waste += missed * (inputPrice(b) - cachedPrice(b));
+      tokens += missed;
       at.push(b.index);
       uncached.add(b);
       change ??= pieces;
@@ -218,7 +229,7 @@ function volatilePrompts(byCassette: Request[][], uncached: Set<Request>): Findi
 }
 
 /** Tools offered in requests that no recording ever called. */
-function unusedTools(all: Request[], uncached: Set<Request>): Finding[] {
+function unusedTools(all: Request[], uncached: Set<Request>, repeated: Set<Request>): Finding[] {
   const called = new Set<string>();
   for (const r of all) {
     for (const call of readContent(r.interaction.response.body).toolCalls) called.add(call.name);
@@ -238,8 +249,10 @@ function unusedTools(all: Request[], uncached: Set<Request>): Finding[] {
     }
     if (here === 0) continue;
     tokens += here;
-    waste += here * inputPrice(r);
-    if (uncached.has(r)) overlap += here * (inputPrice(r) - cachedPrice(r));
+    waste += here * r.rate;
+    // A repeated request's cost is counted whole as a duplicate already.
+    if (repeated.has(r)) overlap += here * r.rate;
+    else if (uncached.has(r)) overlap += here * Math.max(0, r.rate - cachedPrice(r));
     where.set(r.path, [...(where.get(r.path) ?? []), r.index]);
   }
   if (unused.size === 0) return [];
@@ -256,7 +269,7 @@ function unusedTools(all: Request[], uncached: Set<Request>): Finding[] {
 }
 
 /** Tool results big enough to matter that every later request of a loop sends again. */
-function largeResults(byCassette: Request[][], threshold: number, uncached: Set<Request>): Finding[] {
+function largeResults(byCassette: Request[][], threshold: number, uncached: Set<Request>, repeated: Set<Request>): Finding[] {
   const findings: Finding[] = [];
   for (const requests of byCassette) {
     const seen = new Map<string, { name: string; tokens: number; at: number[]; waste: number; overlap: number }>();
@@ -265,8 +278,9 @@ function largeResults(byCassette: Request[][], threshold: number, uncached: Set<
         if (result.tokens < threshold) continue;
         const entry = seen.get(result.key) ?? { name: result.name, tokens: result.tokens, at: [], waste: 0, overlap: 0 };
         entry.at.push(r.index);
-        entry.waste += result.tokens * inputPrice(r);
-        if (uncached.has(r)) entry.overlap += result.tokens * (inputPrice(r) - cachedPrice(r));
+        entry.waste += result.tokens * r.rate;
+        if (repeated.has(r)) entry.overlap += result.tokens * r.rate;
+        else if (uncached.has(r)) entry.overlap += result.tokens * Math.max(0, r.rate - cachedPrice(r));
         seen.set(result.key, entry);
       }
     }
@@ -284,8 +298,23 @@ function largeResults(byCassette: Request[][], threshold: number, uncached: Set<
   return findings;
 }
 
+/** Why the model stopped short: a reason to ask again. */
+const CUT_OFF = new Set(["max_tokens", "length", "incomplete", "MAX_TOKENS", "model_context_window_exceeded"]);
+
+/**
+ * An answer worth asking again after: an error, nothing at all, cut off, or one a fault rewrote
+ * when it was recorded. A request repeated after one is a retry, not a waste.
+ */
+function unusable(r: Request): boolean {
+  const { response, meta } = r.interaction;
+  if (response.status >= 400 || meta.fault) return true;
+  const content = readContent(response.body);
+  if (!content.text.trim() && content.toolCalls.length === 0) return true;
+  return CUT_OFF.has(stopReason(response.body) ?? "");
+}
+
 /** The same request sent again in one test, after an answer that was fine. */
-function duplicates(byCassette: Request[][]): Finding[] {
+function duplicates(byCassette: Request[][], repeated: Set<Request>): Finding[] {
   const findings: Finding[] = [];
   for (const requests of byCassette) {
     const groups = new Map<string, Request[]>();
@@ -295,9 +324,9 @@ function duplicates(byCassette: Request[][]): Finding[] {
       groups.set(key, [...(groups.get(key) ?? []), r]);
     }
     for (const group of groups.values()) {
-      // A request repeated after an error is a retry, and that's fine.
-      const repeats = group.slice(1).filter((_, i) => group[i]!.interaction.response.status < 400);
+      const repeats = group.slice(1).filter((_, i) => !unusable(group[i]!));
       if (repeats.length === 0) continue;
+      for (const r of repeats) repeated.add(r);
       findings.push({
         kind: "duplicate-request",
         waste: repeats.reduce((sum, r) => sum + r.cost, 0),
@@ -363,11 +392,14 @@ export function diagnose(cassettes: { path: string; data: CassetteFile }[], opti
   const byCassette = cassettes.map((c) => read(c.path, c.data, pricing)).filter((r) => r.length > 0);
   const all = byCassette.flat();
   const uncached = new Set<Request>();
+  // Requests that repeat an earlier one: their whole cost is the duplicate's, never counted twice.
+  const repeated = new Set<Request>();
+  const duplicated = merge(duplicates(byCassette, repeated));
   const findings = [
-    ...merge(volatilePrompts(byCassette, uncached)),
-    ...unusedTools(all, uncached),
-    ...largeResults(byCassette, options.largeResult ?? 8000, uncached),
-    ...merge(duplicates(byCassette)),
+    ...merge(volatilePrompts(byCassette, uncached, repeated)),
+    ...unusedTools(all, uncached, repeated),
+    ...largeResults(byCassette, options.largeResult ?? 8000, uncached, repeated),
+    ...duplicated,
     ...generousLimits(all),
   ].sort((a, b) => b.waste - a.waste || (b.risk ?? 0) - (a.risk ?? 0) || b.tokens - a.tokens);
   const cost = all.reduce((sum, r) => sum + r.cost, 0);

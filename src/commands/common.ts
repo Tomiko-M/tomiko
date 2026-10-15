@@ -21,7 +21,8 @@ export interface Io {
   /** Asks a yes/no question; true for yes. */
   confirm?(question: string): Promise<boolean>;
   /** Runs a shell command with extra environment variables, showing its output unless `quiet`. */
-  exec?(command: string, env: Record<string, string>, options: { quiet: boolean }): Promise<ExecResult>;
+  /** Runs a shell command in `options.cwd`, or in `cwd` without it. */
+  exec?(command: string, env: Record<string, string>, options: { quiet: boolean; cwd?: string }): Promise<ExecResult>;
 }
 
 export interface ExecResult {

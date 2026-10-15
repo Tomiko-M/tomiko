@@ -49,6 +49,18 @@ export async function resolveRevision(cwd: string, ref: string): Promise<Revisio
   throw new GitError(`Unknown git revision: ${ref}`);
 }
 
+/** Git's empty tree: what a repository without commits is compared with. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/** Whether HEAD points at a commit; a new repository's doesn't until the first one. */
+export async function hasCommits(cwd: string): Promise<boolean> {
+  try {
+    return (await git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])).trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
 export interface ChangedFile {
   /** Relative to the repository root, with forward slashes. */
   path: string;

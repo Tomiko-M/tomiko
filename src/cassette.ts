@@ -258,6 +258,8 @@ export class Cassette {
   private failure: "missing" | "mismatched" | undefined;
   /** Replay mode without a file only fails once a request needs it, so tests without LLM calls pass. */
   private missing = false;
+  /** The cassette's own file; `file` differs when a trial run keeps it elsewhere. */
+  private source: string | undefined;
 
   private constructor(
     readonly name: string,
@@ -296,6 +298,7 @@ export class Cassette {
     const mode = chosenForRecording(own) ? "record" : resolveMode(options.mode);
     const existing = mode === "record" ? undefined : await loadCassette(file);
     const cassette = new Cassette(name, file, mode, existing?.interactions ?? [], options);
+    cassette.source = own;
     cassette.missing = mode === "replay" && !existing;
     cassette.loaded = existing !== undefined;
     cassette.size = existing?.interactions.length ?? 0;
@@ -389,6 +392,8 @@ export class Cassette {
       // Reading the real answer to the end also finishes recording it, as it was.
       await response.arrayBuffer();
       entry.fault = misbehavior.name;
+      // What the caller did next answered a rewritten answer: `tomiko doctor` takes that into account.
+      if (!entry.replayed) entry.interaction.meta.fault = misbehavior.name;
       entry.response = misbehave(misbehavior, entry.interaction.response, recordedRequest);
       response = buildResponse(entry.response, request.url);
     }
@@ -615,6 +620,7 @@ export class Cassette {
     const { model, usage } = extractUsage(interaction.response.body, interaction.response.headers);
     interaction.meta = {
       ...(interaction.meta.judge ? { judge: true } : {}),
+      ...(interaction.meta.fault ? { fault: interaction.meta.fault } : {}),
       provider: interaction.meta.provider,
       model: model ?? requestModel(interaction.request),
       usage,
@@ -692,6 +698,7 @@ export class Cassette {
     recordReport(this.report);
     logUsage({
       file: this.file,
+      ...(this.source !== undefined && this.source !== this.file ? { source: this.source } : {}),
       mode: this.mode,
       exists: this.loaded,
       size: this.size,

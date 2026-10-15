@@ -5,7 +5,7 @@ import { plural } from "../format.js";
 import { readAt, repoRoot } from "../git.js";
 import { formatFindings, redactInteractions, scanInteractions, secretGuard, summarize } from "../secrets.js";
 import { saveCassette } from "../store.js";
-import { Spinner } from "../terminal.js";
+import { Spinner, padTo, width } from "../terminal.js";
 import type { SecretFinding } from "../types.js";
 import { discoverCassettes } from "../view/discover.js";
 import { type Command, failure, parseCassette } from "./common.js";
@@ -113,9 +113,9 @@ export const scan: Command = {
 
     if (fix) {
       io.log(`  ${p.green("✔")} Replaced ${p.bold(plural(total, "secret"))} in ${p.bold(plural(reports.length, "cassette"))} with placeholders`);
-      const pad = Math.max(...reports.map((r) => r.path.length));
+      const pad = Math.max(...reports.map((r) => width(r.path)));
       for (const r of reports) {
-        io.log(`    ${p.link(r.path.padEnd(pad), pathToFileURL(r.file).href)}  ${p.dim(plural(r.findings.length, "secret"))}`);
+        io.log(`    ${p.link(padTo(r.path, pad), pathToFileURL(r.file).href)}  ${p.dim(plural(r.findings.length, "secret"))}`);
       }
       if (committed > 0) io.log(revoke(committed));
       return 0;

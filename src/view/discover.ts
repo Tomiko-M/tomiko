@@ -1,19 +1,15 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { asCassette } from "../store.js";
 import type { CassetteFile } from "../types.js";
 
-const SKIP = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", ".turbo"]);
+/** Not searched by default: dependencies, builds, and `.tomiko`, where `tomiko matrix --keep` puts copies. */
+const SKIP = new Set(["node_modules", ".git", "dist", "build", "coverage", ".next", ".turbo", ".tomiko"]);
 const DEFAULT_DIR = "__cassettes__";
-
-function isCassette(data: unknown): data is CassetteFile {
-  const d = data as Partial<CassetteFile> | null;
-  return d !== null && typeof d === "object" && d.version === 1 && Array.isArray(d.interactions);
-}
 
 async function readCassette(file: string): Promise<CassetteFile | undefined> {
   try {
-    const data: unknown = JSON.parse(await readFile(file, "utf8"));
-    return isCassette(data) ? data : undefined;
+    return asCassette(JSON.parse(await readFile(file, "utf8")));
   } catch {
     return undefined;
   }

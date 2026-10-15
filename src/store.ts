@@ -23,12 +23,37 @@ export function cassettePath(dir: string, name: string): string {
   return join(resolve(dir), ...segments) + ".json";
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * A cassette as tomiko reads it, or undefined when `data` isn't one. Fields a hand-edited or older
+ * file may lack (`meta`, headers) get their empty defaults.
+ */
+export function asCassette(data: unknown): CassetteFile | undefined {
+  if (!isObj(data) || data.version !== 1 || !Array.isArray(data.interactions)) return undefined;
+  for (const i of data.interactions) {
+    if (!isObj(i) || !isObj(i.request) || !isObj(i.response)) return undefined;
+    if (typeof i.request.method !== "string" || typeof i.request.url !== "string") return undefined;
+    if (!isObj(i.response.body) || typeof i.response.status !== "number") return undefined;
+    if (!isObj(i.response.headers)) i.response.headers = {};
+    if (!isObj(i.meta)) i.meta = {};
+    const meta = i.meta as Record<string, unknown>;
+    if (typeof meta.recordedAt !== "string") meta.recordedAt = "";
+    if (typeof meta.durationMs !== "number") meta.durationMs = 0;
+  }
+  return data as unknown as CassetteFile;
+}
+
 export async function loadCassette(file: string): Promise<CassetteFile | undefined> {
   if (!existsSync(file)) return undefined;
-  const data = JSON.parse(await readFile(file, "utf8")) as CassetteFile;
-  if (data?.version !== 1 || !Array.isArray(data.interactions)) {
-    throw new TomikoError(`Unsupported cassette format in ${file}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(file, "utf8"));
+  } catch (error) {
+    throw new TomikoError(`Cassette ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const data = asCassette(parsed);
+  if (!data) throw new TomikoError(`Unsupported cassette format in ${file}`);
   return data;
 }
 

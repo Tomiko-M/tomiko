@@ -1,8 +1,8 @@
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { diffCassettes, sideOf } from "../compare.js";
-import { LOG_ENV, MODEL_ENV, SHADOW_ENV } from "../control.js";
+import { LOG_ENV, MODEL_ENV, readUsage, SHADOW_ENV } from "../control.js";
 import { duration, money, plural, shortModel } from "../format.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
 import { type Paint, Spinner, width } from "../terminal.js";
@@ -10,7 +10,7 @@ import type { CassetteFile } from "../types.js";
 import { extractUsage } from "../usage.js";
 import { discoverCassettes } from "../view/discover.js";
 import { type Command, failure, type Io } from "./common.js";
-import { approve, execute, jsonReport, readReport, testCommand, type TestResults } from "./run.js";
+import { approve, execute, jsonReport, readReport, testCommand, testDir, testFileOf, type TestResults } from "./run.js";
 
 interface Row {
   model: string;
@@ -63,7 +63,8 @@ function totals(files: CassetteFile[]): { cost: number | null; durationMs: numbe
   return { cost: priced > 0 ? cost : null, durationMs, models };
 }
 
-const passedAll = (row: Row) => (row.tests ? row.tests.failed.length === 0 && row.tests.passed > 0 : row.code === 0);
+/** Every test passed, and the run said so too: a failure outside any test fails it. */
+const passedAll = (row: Row) => row.code === 0 && (!row.tests || (row.tests.failed.length === 0 && row.tests.passed > 0));
 
 function testsCell(p: Paint, row: Row): string {
   if (!row.tests) return row.code === 0 ? p.green("passed") : p.red(`failed (exit ${row.code})`);
@@ -94,10 +95,17 @@ function table(p: Paint, rows: Row[], now: Row): string[] {
 }
 
 function verdict(p: Paint, rows: Row[], now: Row): string {
-  const passing = rows.filter((r) => passedAll(r) && r.cost !== null).sort((a, b) => a.cost! - b.cost!);
-  const best = passing[0];
-  const cheapest = rows.filter((r) => r.cost !== null).sort((a, b) => a.cost! - b.cost!)[0];
+  // Cheapest first; a model without a price after every priced one.
+  const byCost = (a: Row, b: Row) => (a.cost ?? Infinity) - (b.cost ?? Infinity);
+  const passing = rows.filter(passedAll).sort(byCost);
+  const best = passing.find((r) => r.cost !== null) ?? passing[0];
+  const cheapest = rows.filter((r) => r.cost !== null).sort(byCost)[0];
   if (!best) return `${p.yellow("◆")} No model passes every test.${passedAll(now) ? "" : " Not even the recordings as they are: fix those first."}`;
+  if (best.cost === null || now.cost === null) {
+    const others = passing.filter((r) => !r.now).map((r) => p.bold(shortModel(r.model)));
+    if (others.length === 0) return `${p.accent("◆")} Only ${p.bold(shortModel(now.model))}, what you use now, passes every test.`;
+    return `${p.accent("◆")} ${others.join(", ")} ${others.length === 1 ? "passes" : "pass"} every test; tomiko has no price to compare ${others.length === 1 ? "it" : "them"} with what you use now.`;
+  }
   if (best.now) {
     const note =
       cheapest && !cheapest.now && cheapest.cost! < now.cost!
@@ -166,13 +174,22 @@ export const matrix: Command = {
     if (maxCost !== undefined && total > maxCost) return failure(io, p, `That is more than --max-cost ${args.flags["max-cost"] as string}. Nothing was run.`);
     if (!(await approve(io, p, args.flags.yes === true, `Run your tests on ${plural(models.length, "model")}?`))) return 1;
 
+    // Given cassettes, only their tests run, so the estimate is what it costs.
+    const testFiles = args.positional.length === 0 ? [] : found.map((f) => testFileOf(f.file));
+    const limited = testFiles.length > 0 && testFiles.every(Boolean) ? [...new Set(testFiles as string[])] : [];
+    if (args.positional.length > 0 && limited.length === 0) {
+      io.log(`  ${p.dim("Some of these cassettes have no test file of their own next to them, so all your tests run.")}`);
+      io.log("");
+    }
+
+    const root = testDir(io.cwd, args.rest);
     const exec = io.exec ?? execute(io.cwd);
     const scratch = mkdtempSync(join(tmpdir(), "tomiko-matrix-"));
     try {
       const run = async (label: string, env: Record<string, string>, report: string) => {
         const spinner = new Spinner(io.stream, p, io.animate).start(label);
-        const command = testCommand(io.cwd, args.rest, [], jsonReport(io.cwd, args.rest, report));
-        const result = await exec(command, env, { quiet: true });
+        const command = testCommand(io.cwd, args.rest, limited, jsonReport(io.cwd, args.rest, report));
+        const result = await exec(command, env, { quiet: true, cwd: root });
         await spinner.stop();
         return { code: result.code, tests: readReport(report) };
       };
@@ -183,24 +200,31 @@ export const matrix: Command = {
       const rows: Row[] = [now];
       for (const [i, model] of models.entries()) {
         const shadow = join(scratch, slug(model));
+        const log = join(scratch, `${slug(model)}.log`);
         const result = await run(
           `Running your tests on ${p.bold(model)}… ${p.dim(`${i + 1}/${models.length}`)}`,
-          { TOMIKO_MODE: "record", [MODEL_ENV]: model, [SHADOW_ENV]: shadow, [LOG_ENV]: join(scratch, `${slug(model)}.log`) },
+          { TOMIKO_MODE: "record", [MODEL_ENV]: model, [SHADOW_ENV]: shadow, [LOG_ENV]: log },
           join(scratch, `${slug(model)}.json`),
         );
         const trial = await discoverCassettes([shadow], shadow).catch(() => []);
         const t = totals(trial.map((f) => f.data));
+        // Each trial cassette logged which cassette it stands in for, wherever the tests ran from.
+        const sources = new Map(readUsage(log).flatMap((e) => (e.source ? [[e.file, e.source] as const] : [])));
         let behavior = 0;
         let wording = 0;
+        let compared = 0;
         for (const cassette of trial) {
-          const own = found.find((f) => relative(io.cwd, f.file) === cassette.path);
+          const source = sources.get(cassette.file);
+          const own = found.find((f) => (source ? f.file === source : relative(root, f.file) === cassette.path));
           if (!own) continue;
+          compared++;
           const impact = diffCassettes(cassette.path, own.data, cassette.data).impact;
           if (impact === "behavior") behavior++;
           else if (impact === "wording") wording++;
         }
-        rows.push({ model, now: false, ...result, cost: t.cost, durationMs: t.durationMs, behavior, wording, compared: trial.length });
-        if (args.flags.keep) cpSync(shadow, join(io.cwd, ".tomiko", "matrix", slug(model)), { recursive: true });
+        rows.push({ model, now: false, ...result, cost: t.cost, durationMs: t.durationMs, behavior, wording, compared });
+        // A model that failed before any test ran has nothing to keep.
+        if (args.flags.keep && existsSync(shadow)) cpSync(shadow, join(io.cwd, ".tomiko", "matrix", slug(model)), { recursive: true });
       }
 
       for (const line of table(p, rows, now)) io.log(line);

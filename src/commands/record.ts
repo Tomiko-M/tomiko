@@ -5,11 +5,11 @@ import { diffCassettes } from "../compare.js";
 import { LOG_ENV, readUsage, RECORD_ENV, type UsageEntry } from "../control.js";
 import { duration, plural } from "../format.js";
 import { repoRoot } from "../git.js";
-import { Spinner } from "../terminal.js";
+import { Spinner, padTo, width } from "../terminal.js";
 import { discoverCassettes } from "../view/discover.js";
 import { type Command, failure, type Io } from "./common.js";
 import { fromGit, showComparison } from "./diff.js";
-import { approve, cassettesOf, estimate, estimateLines, execute, isTestFile, testCommand, testFileOf } from "./run.js";
+import { approve, cassettesOf, estimate, estimateLines, execute, isTestFile, testCommand, testDir, testFileOf } from "./run.js";
 
 /** A scratch directory for the run's log and list of cassettes, removed afterwards. */
 function scratch(): { dir: string; log: string; list: string; done(): void } {
@@ -59,6 +59,8 @@ export const record: Command = {
     if (maxCost !== undefined && !(maxCost >= 0)) return failure(io, p, `--max-cost takes an amount in dollars, like 0.50`);
     if (args.flags.stale && args.positional.length > 0) return failure(io, p, "--stale finds the cassettes itself; leave out the paths.");
     const exec = io.exec ?? execute(io.cwd);
+    // The project's own runner, from its root, wherever you are in it.
+    const cwd = testDir(io.cwd, args.rest);
     const run = scratch();
     try {
       // 1. Which cassettes.
@@ -67,7 +69,7 @@ export const record: Command = {
       if (args.flags.stale) {
         const spinner = new Spinner(io.stream, p, io.animate).start("Replaying your tests to find cassettes that no longer match…");
         const command = testCommand(io.cwd, args.rest);
-        const result = await exec(command, { TOMIKO_MODE: "replay", [LOG_ENV]: run.log }, { quiet: true });
+        const result = await exec(command, { TOMIKO_MODE: "replay", [LOG_ENV]: run.log }, { quiet: true, cwd });
         await spinner.stop();
         const entries = readUsage(run.log);
         if (entries.length === 0 && result.code !== 0) {
@@ -83,18 +85,29 @@ export const record: Command = {
         }
         missing = found.filter((f) => f.reason === "missing").length;
         io.log(`  ${p.yellow("~")} ${p.bold(plural(found.length, "cassette"))} out of date:`);
-        const pad = Math.max(...found.map((f) => show(io, f.file).length));
+        const pad = Math.max(...found.map((f) => width(show(io, f.file))));
         for (const f of found) {
           const mark = f.reason === "missing" ? p.green("+") : p.yellow("~");
-          io.log(`    ${mark} ${show(io, f.file).padEnd(pad)}  ${p.dim(f.reason === "missing" ? "not recorded yet" : "no longer matches its test")}`);
+          io.log(`    ${mark} ${padTo(show(io, f.file), pad)}  ${p.dim(f.reason === "missing" ? "not recorded yet" : "no longer matches its test")}`);
         }
         io.log("");
         chosen = found.map((f) => f.file);
       } else if (args.positional.length > 0) {
         chosen = [];
         for (const path of args.positional.map((p) => resolve(io.cwd, p))) {
-          if (isTestFile(path)) chosen.push(cassettesOf(path));
-          else if (existsSync(path)) chosen.push(path);
+          if (isTestFile(path)) {
+            const dir = cassettesOf(path);
+            // Elsewhere (a `dir` option), its cassettes can't be found from the test file.
+            if (!existsSync(dir)) {
+              return failure(
+                io,
+                p,
+                `No cassettes for ${show(io, path)} in ${show(io, dir)}. If your tests keep them elsewhere (the \`dir\` option), ` +
+                  `pass that directory or the cassette files instead.`,
+              );
+            }
+            chosen.push(dir);
+          } else if (existsSync(path)) chosen.push(path);
           else return failure(io, p, `No such test file, cassette or directory: ${show(io, path)}`);
         }
       }
@@ -104,7 +117,9 @@ export const record: Command = {
       // An empty list would mean every cassette to discoverCassettes.
       const existing = chosen !== "all" && present.length === 0 ? [] : (await discoverCassettes(present, io.cwd)).map((f) => f.data);
       const cost = estimate(existing);
-      const scope = chosen === "all" ? "every cassette" : plural(args.flags.stale ? chosen.length : existing.length, "cassette");
+      // A directory stands for every cassette in it.
+      const count = args.flags.stale ? chosen.length : existing.length;
+      const scope = chosen === "all" ? "every cassette" : plural(count, "cassette");
       io.log(`  ${p.bold("tomiko record")}  ${p.dim(`${scope} · ${plural(cost.requests, "request")}`)}`);
       io.log("");
       for (const line of estimateLines(p, cost, missing)) io.log(line);
@@ -112,7 +127,7 @@ export const record: Command = {
       if (maxCost !== undefined && cost.cost > maxCost) {
         return failure(io, p, `That is more than --max-cost ${args.flags["max-cost"] as string}. Nothing was recorded.`);
       }
-      if (!(await approve(io, p, yes, chosen === "all" ? "Re-record every cassette?" : `Re-record ${plural(chosen.length, "cassette")}?`))) return 1;
+      if (!(await approve(io, p, yes, chosen === "all" ? "Re-record every cassette?" : `Re-record ${plural(count, "cassette")}?`))) return 1;
 
       // 3. Record.
       const env: Record<string, string> = { [LOG_ENV]: run.log };
@@ -129,11 +144,11 @@ export const record: Command = {
       const command = testCommand(io.cwd, args.rest, files);
       const shown = Object.entries(env)
         .filter(([key]) => key !== LOG_ENV)
-        .map(([key, value]) => (key === RECORD_ENV ? `${key}=(${plural(chosen.length, "cassette")})` : `${key}=${value}`));
+        .map(([key, value]) => (key === RECORD_ENV ? `${key}=(${plural(count, "cassette")})` : `${key}=${value}`));
       io.log(`  ${p.dim("▸")} ${p.dim(shown.join(" "))} ${command}`);
       io.log("");
       const started = Date.now();
-      const result = await exec(command, env, { quiet: false });
+      const result = await exec(command, env, { quiet: false, cwd });
       const recorded = unique(readUsage(run.log).filter((e) => e.recorded > 0).map((e) => e.file));
       io.log("");
       const took = duration(Date.now() - started);

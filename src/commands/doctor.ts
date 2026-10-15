@@ -19,7 +19,7 @@ function requests(list: number[]): string {
   return run ? `#${sorted[0]}–#${sorted.at(-1)}` : `${sorted.slice(0, 3).map((n) => `#${n}`).join(", ")}${sorted.length > 3 ? "…" : ""}`;
 }
 
-const times = (n: number) => (n === 2 ? "twice" : `${n} times`);
+const times = (n: number) => (n === 1 ? "once" : n === 2 ? "twice" : `${n} times`);
 
 /** The changed part of a prompt with a little context, on one line. */
 function snippet(p: Paint, pieces: Piece[], mask: (t: string) => string): Span[] {
@@ -97,32 +97,48 @@ function show(f: Finding, p: Paint, mask: (t: string) => string): Shown {
 }
 
 export function renderDiagnosis(d: Diagnosis, p: Paint, columns = 100, mask: (t: string) => string = (t) => t): string[] {
-  const head = `  ${p.bold("tomiko doctor")}  ${p.dim(`${plural(d.cassettes, "cassette")} · ${plural(d.requests, "request")} · ${money(d.cost)} a run`)}`;
+  const stats = `${plural(d.cassettes, "cassette")} · ${plural(d.requests, "request")} · ${money(d.cost)} a run`;
   if (d.findings.length === 0) {
-    return [`  ${p.green("✔")} Nothing to fix in ${plural(d.cassettes, "cassette")} ${p.dim(`· ${plural(d.requests, "request")} · ${money(d.cost)} a run`)}`];
+    const done = `Nothing to fix in ${plural(d.cassettes, "cassette")}`;
+    if (4 + width(done) + 3 + width(stats) <= columns) return [`  ${p.green("✔")} ${done} ${p.dim(`· ${stats.slice(stats.indexOf("·") + 2)}`)}`];
+    return [`  ${p.green("✔")} ${done}`, `    ${p.dim(stats)}`];
   }
+  // The title and its numbers, on two lines when they don't fit on one.
+  const head = 2 + width("tomiko doctor") + 2 + width(stats) <= columns ? `  ${p.bold("tomiko doctor")}  ${p.dim(stats)}` : `  ${p.bold("tomiko doctor")}\n  ${p.dim(stats)}`;
   const shown = d.findings.map((f) => ({ f, s: show(f, p, mask) }));
   const right = Math.min(Math.max(...shown.map(({ s }) => width(s.title))) + 4, Math.max(columns - 26, 40));
   const lines = [head, ""];
   for (const { f, s } of shown) {
     const share = d.cost > 0 ? f.waste / d.cost : 0;
     const mark = f.waste === 0 ? p.dim("○") : share >= 0.1 ? p.red("▲") : p.yellow("●");
-    const pad = " ".repeat(Math.max(2, right - width(s.title)));
-    lines.push(`  ${mark} ${p.bold(s.title)}${pad}${f.waste > 0 ? p.bold(s.amount) : p.dim(s.amount)}`);
+    const amount = f.waste > 0 ? p.bold(s.amount) : p.dim(s.amount);
+    if (4 + width(s.title) + 2 + width(s.amount) <= columns) {
+      const pad = " ".repeat(Math.max(2, right - width(s.title)));
+      lines.push(`  ${mark} ${p.bold(s.title)}${pad}${amount}`);
+    } else {
+      // Too narrow for the amount beside the title: the title wraps, the amount goes under it.
+      const [first, ...more] = wrapSpans([{ text: s.title, style: p.bold }], columns - 4);
+      lines.push(`  ${mark} ${first}`, ...more.map((line) => `    ${line}`), `    ${amount}`);
+    }
     for (const spans of s.lines) lines.push(...wrapSpans(spans, columns - 4).map((line) => `    ${line}`));
     lines.push(...wrapSpans([{ text: s.advice, style: p.dim }], columns - 4).map((line) => `    ${line}`));
     lines.push("");
   }
   const saved = d.savings;
   lines.push(`  ${p.dim("─".repeat(Math.max(20, Math.min(columns - 4, 56))))}`);
+  const note = (text: string) => wrapSpans([{ text, style: p.dim }], columns - 4).map((line) => `    ${line}`);
   if (saved > 0) {
     const pct = d.cost > 0 ? ` (${Math.round((saved / d.cost) * 100)}%)` : "";
-    lines.push(`  ${p.accent("◆")} Fixing all of it saves ${p.bold(`≈ ${money(saved)}`)} of ${money(d.cost)} a run${pct}.`);
-    lines.push(`    ${p.dim("A live run of these tests spends that; your app spends the same per conversation like them.")}`);
+    const [first, ...more] = wrapSpans(
+      [{ text: "Fixing all of it saves " }, { text: `≈ ${money(saved)}`, style: p.bold }, { text: ` of ${money(d.cost)} a run${pct}.` }],
+      columns - 4,
+    );
+    lines.push(`  ${p.accent("◆")} ${first}`, ...more.map((line) => `    ${line}`));
+    lines.push(...note("A live run of these tests spends that; your app spends the same per conversation like them."));
   } else {
-    lines.push(`  ${p.dim("Nothing costs more than it needs to today; the notes above are about risk.")}`);
+    lines.push(...note("Nothing costs more than it needs to today; the notes above are about risk.").map((line) => line.slice(2)));
   }
-  if (d.unpriced.length > 0) lines.push(`    ${p.dim(`No price for ${d.unpriced.join(", ")}: their share is left out of the amounts.`)}`);
+  if (d.unpriced.length > 0) lines.push(...note(`No price for ${d.unpriced.join(", ")}: their share is left out of the amounts.`));
   return lines;
 }
 

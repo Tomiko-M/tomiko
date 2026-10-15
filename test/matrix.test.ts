@@ -189,3 +189,30 @@ describe("the model override", () => {
     expect(existsSync(shadow)).toBe(true);
   });
 });
+
+describe("tomiko matrix, fixed", () => {
+  it("runs only the tests of the cassettes it is given", async () => {
+    const p = await recorded();
+    write(p.root, "test/agent.test.ts", "// the test file\n");
+    expect(await main(["matrix", "--models", "gpt-5-nano", "--yes", "test/__cassettes__/agent.test.ts/tells-the-weather.json"], p.io)).toBe(0);
+    expect(p.runs.map((r) => r.command.replace(/--outputFile=\S+/, "--outputFile=…"))).toEqual([
+      "npx vitest run test/agent.test.ts --reporter=json --outputFile=…",
+      "npx vitest run test/agent.test.ts --reporter=json --outputFile=…",
+    ]);
+  });
+
+  it("keeps what it can when a model's run records nothing, and trusts the exit code over the report", async () => {
+    const p = await recorded();
+    const real = p.io.exec!;
+    // The second model fails before any test runs; the first passes every test but exits with 1.
+    p.io.exec = async (command, env, options) => {
+      if (env[MODEL_ENV] === "gpt-4.1-nano") return { code: 1, output: "crashed" };
+      const result = await real(command, env, options);
+      return env[MODEL_ENV] === "gpt-5.4-mini" ? { ...result, code: 1 } : result;
+    };
+    expect(await main(["matrix", "--models", "gpt-5.4-mini,gpt-4.1-nano", "--yes", "--keep"], p.io)).toBe(0);
+    expect(p.out.at(-2)).toContain("◆ Nothing cheaper passes every test");
+    expect(existsSync(join(p.root, ".tomiko/matrix/gpt-5.4-mini"))).toBe(true);
+    expect(existsSync(join(p.root, ".tomiko/matrix/gpt-4.1-nano"))).toBe(false);
+  });
+});

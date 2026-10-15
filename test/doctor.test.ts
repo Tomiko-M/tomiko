@@ -164,14 +164,16 @@ describe("tomiko doctor", () => {
 
   it("prints JSON for scripts", async () => {
     const ask = { messages: [{ role: "user", content: "Hours?" }] };
-    const { io, out } = project({ "x.test.ts/dup.json": file(exchange(ask, reply([], 100, 10)), exchange(ask, reply([], 100, 10))) });
+    const answer = () => reply([{ type: "text", text: "9-6" }], 100, 10);
+    const { io, out } = project({ "x.test.ts/dup.json": file(exchange(ask, answer()), exchange(ask, answer())) });
     expect(await main(["doctor", "--json"], io)).toBe(0);
     expect(JSON.parse(out.join("\n"))).toMatchObject({ cassettes: 1, requests: 2, findings: [{ kind: "duplicate-request" }] });
   });
 
   it("colors the severity of each finding", () => {
     const ask = { messages: [{ role: "user", content: "Hours?" }] };
-    const d = diagnose([{ path: "d.json", data: file(exchange(ask, reply([], 100, 10)), exchange(ask, reply([], 100, 10))) }]);
+    const answer = () => reply([{ type: "text", text: "9-6" }], 100, 10);
+    const d = diagnose([{ path: "d.json", data: file(exchange(ask, answer()), exchange(ask, answer())) }]);
     expect(renderDiagnosis(d, paint(true)).join("\n")).toContain("\x1b[31m▲\x1b[39m");
   });
 });

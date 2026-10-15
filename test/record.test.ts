@@ -143,7 +143,7 @@ describe("tomiko record", () => {
     // Only agent.test.ts's two cassettes reached the API; faq.test.ts replayed.
     expect(p.api.calls).toHaveLength(2);
     expect(p.out.join("\n")).toContain("tomiko record  2 cassettes · 2 requests");
-    expect(p.out.join("\n")).toContain("TOMIKO_RECORD=(1 cassette)");
+    expect(p.out.join("\n")).toContain("TOMIKO_RECORD=(2 cassettes)");
   });
 
   it("with --stale, finds what no longer matches and re-records just that", async () => {
@@ -275,7 +275,7 @@ describe("the run protocol", () => {
     const root = tmpDir();
     write(root, "package.json", JSON.stringify({ devDependencies: { jest: "*" } }));
     write(root, "src/a.test.ts", "");
-    expect(testCommand(join(root, "src"), [], [join(root, "src", "a.test.ts")])).toBe("npx jest a.test.ts");
+    expect(testCommand(join(root, "src"), [], [join(root, "src", "a.test.ts")])).toBe("npx jest --runTestsByPath src/a.test.ts");
     write(root, "package.json", JSON.stringify({ scripts: { test: "mocha" } }));
     expect(testCommand(root, [])).toBe("npm test");
     expect(cassettesOf(join(root, "src", "a.test.ts"))).toBe(join(root, "src", "__cassettes__", "a.test.ts"));
