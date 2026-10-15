@@ -5,7 +5,7 @@ import { diffCassettes, sideOf } from "../compare.js";
 import { LOG_ENV, MODEL_ENV, readUsage, SHADOW_ENV } from "../control.js";
 import { duration, money, plural, shortModel } from "../format.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
-import { type Paint, Spinner, width, wrapSpans } from "../terminal.js";
+import { type Paint, Spinner, width, wrapAnsi, wrapSpans } from "../terminal.js";
 import type { CassetteFile } from "../types.js";
 import { extractUsage } from "../usage.js";
 import { discoverCassettes } from "../view/discover.js";
@@ -109,7 +109,7 @@ function verdict(p: Paint, rows: Row[], now: Row): string {
   if (best.now) {
     const note =
       cheapest && !cheapest.now && cheapest.cost! < now.cost!
-        ? ` ${shortModel(cheapest.model)} costs ${(now.cost! / cheapest.cost!).toFixed(1)}× less but fails ${plural(cheapest.tests?.failed.length ?? 1, "test")}.`
+        ? ` ${shortModel(cheapest.model)} costs ${(now.cost! / cheapest.cost!).toFixed(1)}× less but ${cheapest.tests?.failed.length ? `fails ${plural(cheapest.tests.failed.length, "test")}` : "its test run failed"}.`
         : "";
     return `${p.accent("◆")} Nothing cheaper passes every test: ${p.bold(shortModel(now.model))}, what you use now, stays the best buy.${note}`;
   }
@@ -234,7 +234,7 @@ export const matrix: Command = {
       const failed = failures(p, rows, io.columns ?? 100);
       if (failed.length > 0) io.log(["", ...failed].join("\n"));
       io.log("");
-      io.log(`  ${verdict(p, rows, now)}`);
+      io.log(`  ${wrapAnsi(verdict(p, rows, now), (io.columns ?? 100) - 2, "    ")}`);
       if (args.flags.keep) io.log(`    ${p.dim("Each model's cassettes are in .tomiko/matrix; see them with")} ${p.bold("npx tomiko view .tomiko/matrix")}`);
       return 0;
     } finally {

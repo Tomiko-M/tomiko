@@ -62,7 +62,8 @@ export const view: Command = {
     ].filter(Boolean);
     const shown = relative(io.cwd, out).startsWith("..") ? out : relative(io.cwd, out);
 
-    io.log(`  ${p.green("✔")} ${p.bold(plural(found.length, "cassette"))}, ${p.bold(plural(model.requests, "request"))}`);
+    const mcp = model.mcpCalls > 0 ? `, ${p.bold(plural(model.mcpCalls, "MCP call"))}` : "";
+    io.log(`  ${p.green("✔")} ${p.bold(plural(found.length, "cassette"))}, ${p.bold(plural(model.requests, "request"))}${mcp}`);
     io.log(`    ${p.dim(details.join(" · "))}`);
     io.log(`    ${p.accent("→")} ${p.link(shown, pathToFileURL(out).href)}`);
     if (!args.flags["no-open"]) {

@@ -19,10 +19,14 @@ import { Agent, MCPServerStdio, run as runAgent, setDefaultOpenAIClient, setTrac
 import { generateText, stepCountIs } from "ai";
 import OpenAI from "openai";
 import { afterEach, describe, expect, it } from "vitest";
-import { cassette, formatSummary, mcpTransport, summary } from "../src/index.js";
+import { cassette, diagnose, diffCassettes, formatSummary, mcpTransport, summary, type CassetteFile, type Interaction } from "../src/index.js";
+import { main, type Io } from "../src/cli.js";
+import { estimate } from "../src/commands/run.js";
+import { cassetteView } from "../src/view/model.js";
 import "../src/vitest.js";
 import { nameFromCommand, nameOf } from "../src/mcp.js";
-import { anthropicMessage, fakeApi, json, offline, openaiResponse, tmpDir } from "./helpers.js";
+import { ANTHROPIC_URL, anthropicMessage, fakeApi, json, offline, openaiResponse, tmpDir } from "./helpers.js";
+import { writeFileSync } from "node:fs";
 // @ts-expect-error A plain JavaScript fixture, run as its own process too.
 import { notesServer } from "./fixtures/notes-server.mjs";
 
@@ -380,6 +384,63 @@ describe("the OpenAI Agents SDK", () => {
     const starts = happened(log).filter((line) => line === "start").length;
     expect(await run("replay")).toEqual(recorded);
     expect(happened(log).filter((line) => line === "start")).toHaveLength(starts);
+  });
+});
+
+/* -------------------------------------- the other tools -------------------------------------- */
+
+const meta = { recordedAt: "2026-10-15T12:00:00.000Z", durationMs: 12 };
+const mcpCall = (method: string, params: unknown, value: unknown): Interaction => ({
+  request: { method: "MCP", url: `mcp://notes-server/${method}`, ...(params === undefined ? {} : { body: params }) },
+  response: { status: 200, headers: {}, body: { type: "json", value } },
+  meta: { ...meta, provider: "mcp", server: "Notes Server" },
+});
+const note = (text: string) => mcpCall("tools/call", { name: "read_note", arguments: { name: "todo" } }, { result: { content: [{ type: "text", text }] } });
+const listing = () => mcpCall("tools/list", undefined, { result: { tools: [{ name: "read_note", description: "Read a note" }] } });
+const ask = (text: string): Interaction => ({
+  request: { method: "POST", url: ANTHROPIC_URL, body: { model: "claude-sonnet-5-5", messages: [{ role: "user", content: "todo?" }] } },
+  response: { status: 200, headers: {}, body: { type: "json", value: anthropicMessage(text, "claude-sonnet-5-5") } },
+  meta: { ...meta, provider: "anthropic", model: "claude-sonnet-5-5", usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+});
+const file = (...interactions: Interaction[]): CassetteFile => ({ version: 1, interactions });
+
+function cli(cwd: string) {
+  const out: string[] = [];
+  const io: Io = { cwd, log: (m) => void out.push(...m.split("\n")), error: (m) => void out.push(...m.split("\n")), open: async () => true, stream: { isTTY: false, write: () => true }, color: false, animate: false, columns: 120, env: {}, interactive: false };
+  return { io, out };
+}
+
+describe("MCP requests in the other tools", () => {
+  it("diff shows what a server answers differently, by tool", async () => {
+    const changed = diffCassettes("c.json", file(listing(), note("call the plumber"), ask("Call the plumber.")), file(listing(), note("call the plumber, then the electrician"), ask("Call the plumber.")));
+    expect(changed.impact).toBe("behavior");
+    expect(changed.requests[1]).toMatchObject({ status: "changed", mcp: { server: "Notes Server", method: "tools/call", tool: "read_note" } });
+    // What the model's requests cost is what the totals count.
+    expect(changed.after!.requests).toBe(1);
+
+    const dir = tmpDir();
+    writeFileSync(join(dir, "a.json"), JSON.stringify(file(note("call the plumber"))));
+    writeFileSync(join(dir, "b.json"), JSON.stringify(file(note("call the electrician"))));
+    const { io, out } = cli(dir);
+    await main(["diff", "a.json", "b.json"], io);
+    expect(out.join("\n")).toContain("#1  MCP tools/call read_note  Notes Server");
+    expect(out.join("\n")).toContain("result  67% the same words");
+    expect(out.join("\n")).toContain("call the [-plumber-] {+electrician+}");
+  });
+
+  it("doctor and record leave them out: they cost nothing", () => {
+    const twice = file(listing(), listing(), note("x"), ask("ok"));
+    expect(diagnose([{ path: "c.json", data: twice }]).findings).toEqual([]);
+    expect(diagnose([{ path: "c.json", data: twice }]).requests).toBe(1);
+    expect(estimate([twice]).requests).toBe(1);
+  });
+
+  it("the viewer shows each as a call to its server, with what came back", () => {
+    const view = cassetteView("c.json", file(mcpCall("initialize", { protocolVersion: "2025-11-25" }, { result: { protocolVersion: "2025-11-25", capabilities: { tools: {}, logging: {} }, serverInfo: { name: "Notes Server", version: "1.0.0" } } }), listing(), note("call the plumber"), ask("Call the plumber.")));
+    expect(view).toMatchObject({ requests: 1, mcpCalls: 3 });
+    expect(view.interactions[0]!.mcp).toMatchObject({ server: "Notes Server", method: "initialize", info: "Notes Server 1.0.0 · protocol 2025-11-25 · tools, logging" });
+    expect(view.interactions[1]!.mcp!.tools).toEqual([{ name: "read_note", description: "Read a note" }]);
+    expect(view.interactions[2]!.mcp).toMatchObject({ tool: "read_note", input: { name: "todo" }, output: [{ kind: "text", text: "call the plumber" }], isError: false });
   });
 });
 

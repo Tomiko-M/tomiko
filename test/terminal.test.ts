@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, it } from "vitest";
 import { formatSummary, printSummary, type Summary } from "../src/index.js";
-import { animationEnabled, cassetteFrame, colorEnabled, paint, Spinner, wrapSpans } from "../src/terminal.js";
+import { animationEnabled, cassetteFrame, colorEnabled, paint, Spinner, wrapAnsi, wrapSpans } from "../src/terminal.js";
 
 const tty = { isTTY: true, write: () => true };
 const pipe = { isTTY: false, write: () => true };
@@ -38,6 +38,11 @@ describe("paint", () => {
   it("wraps colored text without a space left at the end of a line", () => {
     const p = paint(true, {});
     expect(wrapSpans([{ text: "one two three", style: p.dim }], 8)).toEqual([p.dim("one two"), p.dim("three")]);
+  });
+
+  it("wraps colored text by what it shows, not by its color codes", () => {
+    const p = paint(true, {});
+    expect(wrapAnsi(`${p.bold("one")} two three four`, 13, "  ")).toBe(`${p.bold("one")} two three\n  four`);
   });
 });
 

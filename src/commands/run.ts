@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
-import { sideOf } from "../compare.js";
+import { isMcp, sideOf } from "../compare.js";
 import { plural, usd } from "../format.js";
 import { defaultPricing } from "../pricing.js";
 import type { Paint } from "../terminal.js";
@@ -211,6 +211,8 @@ export function estimate(files: CassetteFile[]): Estimate {
   const result: Estimate = { requests: 0, cost: 0, priced: 0, unpriced: new Map() };
   for (const file of files) {
     for (const interaction of file.interactions) {
+      // An MCP server costs nothing to ask again.
+      if (isMcp(interaction)) continue;
       result.requests++;
       const side = sideOf(interaction, defaultPricing);
       if (side.cost !== null) {

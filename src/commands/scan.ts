@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isMcp } from "../compare.js";
 import { plural } from "../format.js";
 import { readAt, repoRoot } from "../git.js";
 import { formatFindings, redactInteractions, scanInteractions, secretGuard, summarize } from "../secrets.js";
@@ -104,7 +105,9 @@ export const scan: Command = {
       return 0;
     }
     if (total === 0) {
-      io.log(`  ${p.green("✔")} No secrets in ${p.bold(plural(found.length, "cassette"))} ${p.dim(`· ${plural(requests, "request")}`)}`);
+      const mcp = found.reduce((n, c) => n + c.data.interactions.filter(isMcp).length, 0);
+      const what = mcp > 0 ? `${plural(requests - mcp, "request")}, ${plural(mcp, "MCP call")}` : plural(requests, "request");
+      io.log(`  ${p.green("✔")} No secrets in ${p.bold(plural(found.length, "cassette"))} ${p.dim(`· ${what}`)}`);
       return 0;
     }
 

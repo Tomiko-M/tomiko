@@ -100,6 +100,10 @@ function fromBody(o: Obj): ResponseContent {
       if (item.type === "function_call" && typeof item.name === "string") {
         toolCalls.push({ name: item.name, input: parseArguments(str(item.arguments) ?? ""), id: str(item.call_id) });
       }
+      // A remote MCP server's tool, which OpenAI calls for the model.
+      if (item.type === "mcp_call" && typeof item.name === "string") {
+        toolCalls.push({ name: item.name, input: parseArguments(str(item.arguments) ?? ""), id: str(item.id) });
+      }
       if (item.type === "message" && Array.isArray(item.content)) {
         for (const part of item.content.filter(isObj)) {
           if (part.type === "output_text" && typeof part.text === "string") text.push(part.text);

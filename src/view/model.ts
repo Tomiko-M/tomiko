@@ -1,9 +1,12 @@
+import { isMcp } from "../compare.js";
 import { readableBody } from "../converse.js";
 import type { FaultName } from "../faults.js";
+import { type Injection, obeyed } from "../injection.js";
 import { readContent, stopReason } from "../inspect.js";
+import type { McpExchange, RpcMessage } from "../mcp.js";
 import { canonical } from "../match.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
-import type { CassetteFile, Interaction, PricingTable, RecordedBody, ToolCall, Usage } from "../types.js";
+import type { CassetteFile, Interaction, PricingTable, RecordedBody, RecordedCall, ToolCall, Usage } from "../types.js";
 import { addUsage, detectProvider, emptyUsage, extractUsage, isStreamed, requestModel } from "../usage.js";
 
 type Obj = Record<string, unknown>;
@@ -27,12 +30,37 @@ export interface ToolView {
   description?: string;
 }
 
+/** A request to an MCP server, as the viewer shows it. */
+export interface McpView {
+  /** The name the server gives itself, or the one cassettes know it by. */
+  server: string;
+  method: string;
+  /** For `tools/call`: the tool and its arguments. */
+  tool?: string;
+  input?: unknown;
+  /** What came back: text, images, resources. */
+  output: PartView[];
+  isError: boolean;
+  /** A JSON-RPC or HTTP error instead of a result. */
+  error?: string;
+  /** For `tools/list`: the tools the server offers. */
+  tools?: ToolView[];
+  /** For `initialize`: who the server is and what it can do. */
+  info?: string;
+  /** Progress and log messages the server sent while it worked. */
+  notes: string[];
+}
+
 export interface InteractionView {
   index: number;
   /** A judge's request, not one the code under test made. */
   judge: boolean;
   /** A fault that rewrote this answer for the test; the response shown is the real one. */
   fault?: FaultName;
+  /** A request to an MCP server rather than to a model. */
+  mcp?: McpView;
+  /** Prompt injections that reach the model for the first time in this request. */
+  injections?: Injection[];
   method: string;
   url: string;
   status: number;
@@ -61,13 +89,25 @@ export interface InteractionView {
   rawResponse: unknown;
 }
 
+/** How the model took the prompt injections in a cassette. */
+export interface InjectionVerdict {
+  attacks: Injection[];
+  /** What it did that an attack asked for; empty when it resisted. */
+  obeyed: { request: number; what: string }[];
+}
+
 export interface CassetteView {
   /** Path relative to the root the viewer was built from. */
   path: string;
   interactions: InteractionView[];
+  /** Requests to models. */
+  requests: number;
+  /** Requests to MCP servers. */
+  mcpCalls: number;
   usage: Usage;
   cost: number | null;
   unpricedModels: string[];
+  injection?: InjectionVerdict;
 }
 
 export interface ViewModel {
@@ -76,7 +116,10 @@ export interface ViewModel {
   cassettes: CassetteView[];
   usage: Usage;
   cost: number | null;
+  /** Requests to models. */
   requests: number;
+  /** Requests to MCP servers. */
+  mcpCalls: number;
 }
 
 /** Tool results and other content may be a string or a list of text blocks. */
@@ -277,22 +320,139 @@ function interactionView(
   return { view, req };
 }
 
+/** Parts of an MCP result: a tool's content, a resource's contents, a prompt's messages. */
+function mcpParts(result: unknown): PartView[] {
+  if (!isObj(result)) return result === undefined ? [] : [{ kind: "other", label: "result", value: result }];
+  const fromContent = (part: unknown): PartView => {
+    if (!isObj(part)) return { kind: "other", label: "content", value: part };
+    if (typeof part.text === "string") return { kind: "text", text: part.text };
+    if (part.type === "image" || part.type === "audio") return { kind: "image" };
+    if (isObj(part.resource) && typeof part.resource.text === "string") return { kind: "text", text: part.resource.text };
+    return { kind: "other", label: str(part.type) ?? "content", value: part };
+  };
+  if (Array.isArray(result.content)) {
+    const parts = result.content.map(fromContent);
+    if (parts.length === 0 && result.structuredContent !== undefined) return [{ kind: "other", label: "structured content", value: result.structuredContent }];
+    return parts;
+  }
+  if (Array.isArray(result.contents)) return result.contents.map(fromContent);
+  if (Array.isArray(result.messages)) {
+    return result.messages.filter(isObj).map((m) => (isObj(m.content) ? fromContent(m.content) : { kind: "other", label: "message", value: m }));
+  }
+  return [{ kind: "other", label: "result", value: result }];
+}
+
+function mcpNote(m: RpcMessage): string {
+  const params = isObj(m.params) ? m.params : {};
+  if (m.method === "notifications/progress") {
+    const of = typeof params.total === "number" ? `/${params.total}` : "";
+    return `progress ${String(params.progress)}${of}${typeof params.message === "string" ? ` · ${params.message}` : ""}`;
+  }
+  if (m.method === "notifications/message") return `log (${String(params.level ?? "info")}): ${typeof params.data === "string" ? params.data : JSON.stringify(params.data)}`;
+  return m.id !== undefined ? `asked the client: ${String(m.method)}` : String(m.method);
+}
+
+function mcpView(interaction: Interaction): McpView {
+  const { request, response, meta } = interaction;
+  const [, id = "mcp", method = "?"] = /^mcp:\/\/([^/]+)\/(.+)$/.exec(request.url) ?? [];
+  const params = isObj(request.body) ? request.body : undefined;
+  const exchange = (response.body.type === "json" && isObj(response.body.value) ? response.body.value : {}) as McpExchange;
+  const result = isObj(exchange.result) ? exchange.result : undefined;
+  const view: McpView = {
+    server: meta.server ?? id,
+    method,
+    output: [],
+    isError: exchange.error !== undefined || exchange.http !== undefined || result?.isError === true,
+    notes: (exchange.messages ?? []).map(mcpNote),
+  };
+  if (exchange.error) view.error = `error ${exchange.error.code}: ${exchange.error.message}`;
+  else if (exchange.http) view.error = `HTTP ${exchange.http.status}${exchange.http.body ? `: ${exchange.http.body.slice(0, 200)}` : ""}`;
+  if (method === "tools/call" && params && typeof params.name === "string") {
+    view.tool = params.name;
+    view.input = params.arguments ?? {};
+  } else if (params) view.input = params;
+  if (method === "tools/list" && result && Array.isArray(result.tools)) {
+    view.tools = result.tools.filter(isObj).map((t) => ({ name: str(t.name) ?? "?", description: str(t.description) }));
+  } else if ((method === "initialize" || method === "server/discover") && result) {
+    const info = isObj(result.serverInfo) ? result.serverInfo : isObj(result._meta) && isObj(result._meta["io.modelcontextprotocol/serverInfo"]) ? result._meta["io.modelcontextprotocol/serverInfo"] : {};
+    const capabilities = isObj(result.capabilities) ? Object.keys(result.capabilities) : [];
+    const version = str(result.protocolVersion) ?? (Array.isArray(result.supportedVersions) ? result.supportedVersions.join(", ") : undefined);
+    view.info = [[str(info.name), str(info.version)].filter(Boolean).join(" "), version && `protocol ${version}`, capabilities.length > 0 && capabilities.join(", ")].filter(Boolean).join(" · ");
+    if (typeof result.instructions === "string") view.output = [{ kind: "text", text: result.instructions }];
+  } else if (!view.error) view.output = mcpParts(exchange.result);
+  return view;
+}
+
+/** What the model did with the prompt injections in a cassette, read as assertions read it. */
+function verdictOf(file: CassetteFile): InjectionVerdict | undefined {
+  const calls = file.interactions
+    .filter((i) => !isMcp(i) && !i.meta.judge)
+    .map((i): RecordedCall & { position: number } => ({
+      position: file.interactions.indexOf(i) + 1,
+      method: i.request.method,
+      url: i.request.url,
+      requestBody: i.request.body,
+      status: i.response.status,
+      replayed: true,
+      ...(i.meta.injections ? { injections: i.meta.injections } : {}),
+      cost: null,
+      ...readContent(i.response.body),
+    }));
+  const attacks = new Map<string, Injection>();
+  for (const call of calls) for (const attack of call.injections ?? []) attacks.set(attack.canary, attack);
+  if (attacks.size === 0) return undefined;
+  return { attacks: [...attacks.values()], obeyed: obeyed(calls).map((o) => ({ request: calls[o.call - 1]!.position, what: o.what })) };
+}
+
 export function cassetteView(path: string, file: CassetteFile, pricing: PricingTable = defaultPricing): CassetteView {
   const interactions: InteractionView[] = [];
   let previous: (RequestView & { response: { text: string; toolCalls: ToolCall[] } }) | undefined;
+  const seen = new Set<string>();
   file.interactions.forEach((interaction, i) => {
+    if (isMcp(interaction)) {
+      const { request, response, meta } = interaction;
+      interactions.push({
+        index: i + 1,
+        judge: false,
+        mcp: mcpView(interaction),
+        method: request.method,
+        url: request.url,
+        status: response.status,
+        provider: "mcp",
+        recordedAt: meta.recordedAt,
+        durationMs: meta.durationMs,
+        cost: null,
+        systemRepeated: false,
+        tools: [],
+        earlierMessages: 0,
+        repeatsPreviousResponse: false,
+        messages: [],
+        response: { text: "", toolCalls: [], streamed: false },
+        rawRequest: request.body,
+        rawResponse: rawBody(response.body),
+      });
+      return;
+    }
     const { view, req } = interactionView(interaction, i + 1, previous, pricing);
+    const fresh = (interaction.meta.injections ?? []).filter((attack) => !seen.has(attack.canary));
+    for (const attack of fresh) seen.add(attack.canary);
+    if (fresh.length > 0) view.injections = fresh;
     interactions.push(view);
     previous = { ...req, response: view.response };
   });
   const priced = interactions.filter((i) => i.cost !== null);
   const unpriced = interactions.filter((i) => i.usage && i.cost === null).map((i) => i.model ?? "(unknown model)");
+  const injection = verdictOf(file);
+  const mcpCalls = interactions.filter((i) => i.mcp).length;
   return {
     path,
     interactions,
+    requests: interactions.length - mcpCalls,
+    mcpCalls,
     usage: interactions.reduce((u, i) => (i.usage ? addUsage(u, i.usage) : u), emptyUsage()),
     cost: priced.length > 0 ? priced.reduce((sum, i) => sum + (i.cost ?? 0), 0) : null,
     unpricedModels: [...new Set(unpriced)].sort(),
+    ...(injection ? { injection } : {}),
   };
 }
 
@@ -306,6 +466,7 @@ export function viewModel(root: string, files: { path: string; data: CassetteFil
     cassettes,
     usage: cassettes.reduce((u, c) => addUsage(u, c.usage), emptyUsage()),
     cost: priced.length > 0 ? priced.reduce((sum, c) => sum + (c.cost ?? 0), 0) : null,
-    requests: cassettes.reduce((n, c) => n + c.interactions.length, 0),
+    requests: cassettes.reduce((n, c) => n + c.requests, 0),
+    mcpCalls: cassettes.reduce((n, c) => n + c.mcpCalls, 0),
   };
 }

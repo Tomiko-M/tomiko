@@ -232,3 +232,23 @@ export function wrapSpans(spans: Span[], columns: number): string[] {
       .trimEnd(),
   );
 }
+
+/**
+ * Colored text wrapped at spaces to `columns`, each line after the first starting with `indent`.
+ * Color codes take no room.
+ */
+export function wrapAnsi(text: string, columns: number, indent = ""): string {
+  const visible = (s: string) => width(s.replace(/\x1b\[[0-9;]*m/g, ""));
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const room = columns - (lines.length > 0 ? visible(indent) : 0);
+    if (line && visible(`${line} ${word}`) > room) {
+      lines.push(line);
+      line = word;
+    } else line = line ? `${line} ${word}` : word;
+  }
+  lines.push(line);
+  return lines.join(`\n${indent}`);
+}
+

@@ -152,7 +152,9 @@ describe("tomiko matrix", () => {
   it("says when nothing cheaper passes, and refuses without models or over --max-cost", async () => {
     const p = await recorded();
     expect(await main(["matrix", "--models", "gpt-5-nano", "--yes"], p.io)).toBe(0);
-    expect(p.out.at(-1)).toMatch(/◆ Nothing cheaper passes every test: gpt-5\.4, what you use now, stays the best buy\. gpt-5-nano costs \d+\.\d× less but fails 3 tests\./);
+    // The verdict wraps to the terminal's width.
+    const verdict = p.out.slice(p.out.map((l) => l.includes("◆")).lastIndexOf(true)).map((l) => l.trim()).join(" ");
+    expect(verdict).toMatch(/◆ Nothing cheaper passes every test: gpt-5\.4, what you use now, stays the best buy\. gpt-5-nano costs \d+\.\d× less but fails 3 tests\./);
     expect(await main(["matrix"], p.io)).toBe(1);
     expect(p.err.at(-1)).toContain("Name the models to try: --models gpt-5.4-mini,gpt-5-nano");
     expect(await main(["matrix", "--models", "gpt-5.4-mini", "--max-cost", "0.0001", "--yes"], p.io)).toBe(1);
@@ -211,7 +213,10 @@ describe("tomiko matrix, fixed", () => {
       return env[MODEL_ENV] === "gpt-5.4-mini" ? { ...result, code: 1 } : result;
     };
     expect(await main(["matrix", "--models", "gpt-5.4-mini,gpt-4.1-nano", "--yes", "--keep"], p.io)).toBe(0);
-    expect(p.out.at(-2)).toContain("◆ Nothing cheaper passes every test");
+    const verdict = p.out.slice(p.out.map((l) => l.includes("◆")).lastIndexOf(true)).map((l) => l.trim()).join(" ");
+    expect(verdict).toContain("◆ Nothing cheaper passes every test");
+    // Its report says no test failed, but its run did.
+    expect(verdict).toContain("gpt-5.4-mini costs 3.3× less but its test run failed.");
     expect(existsSync(join(p.root, ".tomiko/matrix/gpt-5.4-mini"))).toBe(true);
     expect(existsSync(join(p.root, ".tomiko/matrix/gpt-4.1-nano"))).toBe(false);
   });

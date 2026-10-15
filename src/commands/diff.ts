@@ -196,6 +196,12 @@ function names(ctx: Ctx, list: string[], other: string[], style: (t: string) => 
 
 function requestHeader(ctx: Ctx, r: RequestDiff): string {
   const { p } = ctx;
+  const tag = r.status === "added" ? `  ${p.green("new request")}` : r.status === "removed" ? `  ${p.red("gone")}` : "";
+  const moved = r.beforeIndex !== undefined && r.beforeIndex !== r.index && r.status !== "removed" ? p.dim(` (was #${r.beforeIndex})`) : "";
+  if (r.mcp) {
+    const what = r.mcp.tool ? `${r.mcp.method} ${p.bold(r.mcp.tool)}` : r.mcp.method;
+    return `    ${p.bold(`#${r.index}`)}${moved}  ${p.cyan("MCP")} ${what}  ${p.dim(r.mcp.server)}${tag}`;
+  }
   // Masked whole, since some secrets are recognized by their host (a Slack webhook), then cut down
   // to the path.
   const path = (ctx.mask(r.url).replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "").replace(/[?#].*$/, "") || "/")
@@ -207,18 +213,17 @@ function requestHeader(ctx: Ctx, r: RequestDiff): string {
     r.status === "changed" && modelBefore !== modelAfter
       ? `${p.red(modelBefore ?? "?")} ${p.dim("→")} ${p.green(modelAfter ?? "?")}`
       : p.dim(modelAfter ?? modelBefore ?? "");
-  const tag = r.status === "added" ? `  ${p.green("new request")}` : r.status === "removed" ? `  ${p.red("gone")}` : "";
-  const moved = r.beforeIndex !== undefined && r.beforeIndex !== r.index && r.status !== "removed" ? p.dim(` (was #${r.beforeIndex})`) : "";
   return `    ${p.bold(`#${r.index}`)}${moved}  ${r.method} ${path}${model ? `  ${model}` : ""}${tag}`;
 }
 
 /** What a request that exists on one side only did. */
-function sideLines(ctx: Ctx, side: Side, style: (t: string) => string): string[] {
+function sideLines(ctx: Ctx, side: Side, style: (t: string) => string, mcp: boolean): string[] {
   const { p } = ctx;
   const lines: string[] = [];
   if (side.status >= 400) lines.push(...field(ctx, "status", [{ text: String(side.status), style: p.red }]));
   if (side.toolCalls.length > 0) lines.push(...field(ctx, "calls", [{ text: side.toolCalls.map((t) => t.name).join(", "), style }]));
-  if (side.text) lines.push(...field(ctx, side.status >= 400 ? "error" : "answer", [{ text: clip(flat(ctx, side.text), ctx.full ? Infinity : 160), style }]));
+  const label = mcp ? "result" : side.status >= 400 ? "error" : "answer";
+  if (side.text) lines.push(...field(ctx, label, [{ text: clip(flat(ctx, side.text), ctx.full ? Infinity : 160), style }]));
   return lines;
 }
 
@@ -227,8 +232,8 @@ const CUT_OFF = new Set(["max_tokens", "length", "incomplete", "model_context_wi
 function requestLines(ctx: Ctx, r: RequestDiff, explained: boolean): string[] {
   const { p } = ctx;
   const lines = [requestHeader(ctx, r)];
-  if (r.status === "added") return [...lines, ...sideLines(ctx, r.after!, p.green)];
-  if (r.status === "removed") return [...lines, ...sideLines(ctx, r.before!, p.dim)];
+  if (r.status === "added") return [...lines, ...sideLines(ctx, r.after!, p.green, r.mcp !== undefined)];
+  if (r.status === "removed") return [...lines, ...sideLines(ctx, r.before!, p.dim, r.mcp !== undefined)];
 
   const req = r.request;
   if (req) {
@@ -277,7 +282,7 @@ function requestLines(ctx: Ctx, r: RequestDiff, explained: boolean): string[] {
     }
     if (res.format) lines.push(...field(ctx, "format", [{ text: res.format.before, style: p.red }, { text: " → ", style: p.dim }, { text: res.format.after, style: p.green }]));
     if (res.data) lines.push(...entryLines(ctx, "data", res.data));
-    if (res.text) lines.push(...textLines(ctx, r.after!.status >= 400 ? "error" : "answer", res.text, true));
+    if (res.text) lines.push(...textLines(ctx, r.mcp ? "result" : r.after!.status >= 400 ? "error" : "answer", res.text, true));
   }
 
   const [a, b] = [total(r.before?.usage), total(r.after?.usage)];
@@ -306,7 +311,8 @@ function impactLabel(p: Paint, impact: Impact): string {
 
 function totalsLine(p: Paint, t: Totals): string {
   const cost = t.cost === null ? "no price" : usd(t.cost);
-  return p.dim(`${plural(t.requests, "request")} · ${tokens(total(t.usage))} tokens · ${cost}`);
+  const mcp = t.mcp ? ` · ${plural(t.mcp, "MCP call")}` : "";
+  return p.dim(`${plural(t.requests, "request")}${mcp} · ${tokens(total(t.usage))} tokens · ${cost}`);
 }
 
 function cassetteLines(ctx: Ctx, c: CassetteDiff): string[] {

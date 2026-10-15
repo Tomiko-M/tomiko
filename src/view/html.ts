@@ -13,7 +13,7 @@ const STYLES = /* css */ `
   --bg: #f7f7f5; --panel: #ffffff; --sunken: #f0efec; --border: #e3e1dc; --text: #1c1b19;
   --muted: #6b6862; --accent: #b4441f; --accent-soft: #f8e6de; --ok: #2f7a4b; --ok-soft: #e1f1e6;
   --bad: #b3261e; --bad-soft: #fbe3e1; --tool: #5b4bb7; --tool-soft: #ebe8fa; --result: #22667f; --result-soft: #e0f0f5;
-  --cloud: #8a5a00; --cloud-soft: #fbefd9;
+  --cloud: #8a5a00; --cloud-soft: #fbefd9; --mcp: #0b6b66; --mcp-soft: #dcf0ec;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -21,7 +21,7 @@ const STYLES = /* css */ `
     --bg: #161514; --panel: #1f1e1c; --sunken: #262522; --border: #34322e; --text: #ece9e3;
     --muted: #a19d95; --accent: #f08a5d; --accent-soft: #3a261d; --ok: #7cc79a; --ok-soft: #1d2e23;
     --bad: #f28b82; --bad-soft: #3a1f1d; --tool: #b3a8f5; --tool-soft: #29253f; --result: #7fc4dc; --result-soft: #1a2d34;
-    --cloud: #f2b955; --cloud-soft: #33280f;
+    --cloud: #f2b955; --cloud-soft: #33280f; --mcp: #6dd3c5; --mcp-soft: #142f2c;
     color-scheme: dark;
   }
 }
@@ -54,6 +54,27 @@ h1 { font-size: 18px; margin: 0 0 4px; overflow-wrap: anywhere; }
 .badge.judge { background: var(--tool-soft); color: var(--tool); border-color: transparent; }
 .badge.cloud { background: var(--cloud-soft); color: var(--cloud); border-color: transparent; }
 .badge.fault { background: transparent; color: var(--bad); border: 1px dashed var(--bad); }
+.badge.mcp { background: var(--mcp-soft); color: var(--mcp); border-color: transparent; font-weight: 600; letter-spacing: 0.02em; }
+.card.mcp { border-left: 3px solid var(--mcp); }
+.card.mcp .card-head { background: var(--panel); }
+.mcp-call { background: var(--mcp-soft); border-radius: 10px; padding: 8px 12px; overflow: auto; max-height: 24em; }
+.mcp-call .title { color: var(--mcp); font-weight: 600; }
+.banner { border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; border: 1px solid transparent; }
+.banner .title { font-weight: 600; margin-bottom: 4px; }
+.banner.bad { background: var(--bad-soft); border-color: var(--bad); }
+.banner.bad .title { color: var(--bad); }
+.banner.ok { background: var(--ok-soft); }
+.banner.ok .title { color: var(--ok); }
+.banner ul { margin: 4px 0; padding-left: 18px; }
+.banner a { color: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; }
+mark { color: inherit; border-radius: 3px; padding: 0 2px; }
+mark.injected { background: var(--bad-soft); outline: 1px dashed var(--bad); }
+mark.hidden { background: var(--cloud-soft); color: var(--cloud); }
+mark .tag { font: 600 10.5px/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px; padding: 1px 5px; border-radius: 4px; vertical-align: 1px; }
+mark.injected > .tag { background: var(--bad); color: var(--panel); }
+mark.hidden .tag { background: var(--cloud); color: var(--panel); }
+.item .meta .warn { color: var(--bad); }
+.item .meta .good { color: var(--ok); }
 .spacer { flex: 1; }
 .facts { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .body { padding: 12px 14px; display: grid; gap: 10px; }
@@ -124,11 +145,50 @@ function usageFacts(u, cost) {
   return facts;
 }
 
+/** Text hidden in Unicode tag characters, which no one sees and models read. */
+const HIDDEN = /[\u{E0020}-\u{E007E}]+/gu;
+const reveal = (t) => [...t].map((c) => String.fromCharCode(c.codePointAt(0) - 0xE0000)).join("");
+
+function revealHidden(text) {
+  const out = [];
+  let last = 0;
+  for (const m of text.matchAll(HIDDEN)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(h("mark", { class: "hidden", title: "Invisible on screen: Unicode tag characters, which models read as text." }, h("span", { class: "tag" }, "hidden text"), reveal(m[0])));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** The attacks planted in this cassette, to mark where they appear. */
+let attacks = [];
+
+/** Text with each planted attack marked, and hidden text shown. */
+function decorate(text) {
+  const needles = attacks.flatMap((a) => [a.text, JSON.stringify(a.text).slice(1, -1)].map((n) => ({ n, a }))).filter((x) => x.n.length > 8);
+  const out = [];
+  let rest = text;
+  for (;;) {
+    let best;
+    for (const x of needles) {
+      const at = rest.indexOf(x.n);
+      if (at !== -1 && (!best || at < best.at)) best = { at, ...x };
+    }
+    if (!best) break;
+    out.push(...revealHidden(rest.slice(0, best.at)));
+    out.push(h("mark", { class: "injected", title: "Planted by fault.promptInjection() (" + best.a.attack + "). Only the model saw it." }, h("span", { class: "tag" }, "injected"), ...revealHidden(best.n)));
+    rest = rest.slice(best.at + best.n.length);
+  }
+  out.push(...revealHidden(rest));
+  return out;
+}
+
 function renderPart(part) {
   switch (part.kind) {
-    case "text": return h("div", { class: "text" }, part.text);
+    case "text": return h("div", { class: "text" }, decorate(part.text));
     case "tool_call": return h("div", { class: "call" }, h("span", { class: "title mono" }, "→ " + part.name), h("pre", {}, json(part.input)));
-    case "tool_result": return h("div", { class: "result" + (part.isError ? " error" : "") }, h("span", { class: "title mono" }, part.isError ? "← error" : "← result"), h("pre", {}, part.content));
+    case "tool_result": return h("div", { class: "result" + (part.isError ? " error" : "") }, h("span", { class: "title mono" }, part.isError ? "← error" : "← result"), h("pre", {}, decorate(part.content)));
     case "image": return h("div", { class: "note" }, "[image]");
     default: return h("details", {}, h("summary", {}, part.label), h("pre", {}, json(part.value)));
   }
@@ -161,7 +221,8 @@ function renderInteraction(i, previousIndex) {
     h("div", { class: "card-head" },
       h("span", { class: "num" }, "#" + i.index),
       i.judge && h("span", { class: "badge judge" }, "judge"),
-      i.fault && h("span", { class: "badge fault", title: "fault." + camel(i.fault) + "() rewrote this answer for the test. The response shown is the real one; the next request carries the rewritten one." }, "fault · " + i.fault.replace(/_/g, " ")),
+      i.fault && i.fault !== "prompt_injection" && h("span", { class: "badge fault", title: "fault." + camel(i.fault) + "() rewrote this answer for the test. The response shown is the real one; the next request carries the rewritten one." }, "fault · " + i.fault.replace(/_/g, " ")),
+      (i.injections || []).map((a) => h("span", { class: "badge fault", title: "fault.promptInjection() planted this attack in the result of " + a.tool + ". Only the model saw it; your code never did." }, "injection · " + a.attack)),
       i.provider === "bedrock" && h("span", { class: "badge cloud", title: "Amazon Bedrock" }, "Bedrock"),
       i.model && h("span", { class: "badge mono" }, i.model),
       h("span", { class: "badge " + (ok ? "ok" : "bad") }, String(i.status)),
@@ -184,22 +245,80 @@ function renderInteraction(i, previousIndex) {
   );
 }
 
+/** JSON a tool returned as text, laid out to read. */
+function pretty(text) {
+  if (!/^\s*[[{]/.test(text)) return text;
+  try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+}
+
+function renderMcp(i) {
+  const m = i.mcp;
+  const failed = m.isError;
+  return h("section", { class: "card mcp", id: "r" + i.index },
+    h("div", { class: "card-head" },
+      h("span", { class: "num" }, "#" + i.index),
+      h("span", { class: "badge mcp" }, "MCP"),
+      h("span", { class: "badge mono" }, m.server),
+      h("span", { class: "badge mono" }, m.method),
+      h("span", { class: "badge " + (failed ? "bad" : "ok") }, failed ? "error" : "ok"),
+      h("span", { class: "spacer" }),
+      h("span", { class: "facts" }, h("span", {}, ms(i.durationMs))),
+    ),
+    h("div", { class: "body" },
+      m.info && h("div", { class: "note" }, m.info),
+      m.tools && h("div", { class: "tools" }, h("span", { class: "label" }, "Offers:"), m.tools.map((t) => h("span", { class: "chip mono", title: t.description || "" }, t.name))),
+      m.tool && h("div", { class: "mcp-call" }, h("span", { class: "title mono" }, "→ " + m.tool), h("pre", {}, json(m.input))),
+      !m.tool && m.input !== undefined && h("details", {}, h("summary", {}, "Params"), h("pre", {}, json(m.input))),
+      m.notes.length > 0 && h("div", { class: "note" }, "While it worked: " + m.notes.join(" · ")),
+      m.error
+        ? h("div", { class: "result error" }, h("span", { class: "title mono" }, "← error"), h("pre", {}, m.error))
+        : m.output.length > 0 && h("div", { class: "result" + (failed ? " error" : "") }, h("span", { class: "title mono" }, failed ? "← error" : "← result"), m.output.map((p) => p.kind === "text" ? h("pre", {}, decorate(pretty(p.text))) : renderPart(p))),
+      h("details", { class: "raw" }, h("summary", {}, "Raw request"), h("pre", {}, json(i.rawRequest))),
+      h("details", { class: "raw" }, h("summary", {}, "Raw response"), h("pre", {}, json(i.rawResponse))),
+    ),
+  );
+}
+
+function injectionBanner(v) {
+  const what = v.attacks.map((a) => a.attack + " in the result of " + a.tool + (a.goal ? ", going for " + a.goal : "")).join("; ");
+  const go = (n) => (e) => { e.preventDefault(); document.getElementById("r" + n)?.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  if (v.obeyed.length > 0) {
+    return h("div", { class: "banner bad" },
+      h("div", { class: "title" }, "The model followed the prompt injection"),
+      h("ul", {}, v.obeyed.map((o) => h("li", {}, h("a", { onclick: go(o.request) }, "#" + o.request), " " + o.what))),
+      h("div", { class: "note" }, "Attack: " + what));
+  }
+  return h("div", { class: "banner ok" }, h("div", { class: "title" }, "The model resisted the prompt injection"), h("div", { class: "note" }, "Attack: " + what));
+}
+
 function renderCassette(index) {
   const main = document.querySelector("main");
   main.replaceChildren();
   const c = model.cassettes[index];
   if (!c) { main.append(h("div", { class: "empty" }, model.cassettes.length ? "Pick a cassette." : "No cassettes found.")); return; }
   const models = [...new Set(c.interactions.map((i) => i.model).filter(Boolean))];
-  main.append(
+  const servers = [...new Set(c.interactions.flatMap((i) => i.mcp ? [i.mcp.server] : []))];
+  attacks = c.injection ? c.injection.attacks : [];
+  // History is shown from the previous request to a model; MCP requests sit in between.
+  let previous = 0;
+  const cards = c.interactions.map((i) => {
+    if (i.mcp) return renderMcp(i);
+    const card = renderInteraction(i, previous);
+    previous = i.index;
+    return card;
+  });
+  main.append(...[
     h("h1", {}, c.path.replaceAll("/", "/\u200b")),
     h("div", { class: "sub" }, [
-      c.interactions.length + " request" + (c.interactions.length === 1 ? "" : "s"),
+      c.requests + " request" + (c.requests === 1 ? "" : "s"),
+      c.mcpCalls > 0 && c.mcpCalls + " MCP call" + (c.mcpCalls === 1 ? "" : "s") + " to " + servers.join(", "),
       tokens(totalTokens(c.usage)) + " tokens",
       c.cost === null && c.unpricedModels.length ? "no price for " + c.unpricedModels.join(", ") : usd(c.cost) + (c.unpricedModels.length ? " (no price for " + c.unpricedModels.join(", ") + ")" : ""),
       models.join(", "),
     ].filter(Boolean).join(" · ")),
-    ...c.interactions.map((i) => renderInteraction(i, i.index - 1)),
-  );
+    c.injection && injectionBanner(c.injection),
+    ...cards,
+  ].filter(Boolean));
   document.querySelectorAll(".item").forEach((el) => el.setAttribute("aria-current", String(el.dataset.index === String(index))));
   main.scrollTop = 0;
   window.scrollTo(0, 0);
@@ -216,18 +335,23 @@ function renderList(filter) {
     if (dir !== group) { group = dir; list.append(h("div", { class: "group mono" }, dir.replaceAll("/", "/\u200b"))); }
     list.append(h("button", { class: "item", "data-index": index, onclick: () => { location.hash = String(index); } },
       h("div", { class: "name" }, baseName(c.path)),
-      h("div", { class: "meta" }, c.interactions.length + " req · " + tokens(totalTokens(c.usage)) + " tok · " + usd(c.cost)),
+      h("div", { class: "meta" },
+        c.requests + " req" + (c.mcpCalls ? " · " + c.mcpCalls + " MCP" : "") + " · " + tokens(totalTokens(c.usage)) + " tok · " + usd(c.cost),
+        c.injection && (c.injection.obeyed.length
+          ? h("span", { class: "warn", title: "The model did what a planted prompt injection asked" }, " · ✗ injection")
+          : h("span", { class: "good", title: "The model resisted the planted prompt injection" }, " · ✓ injection"))),
     ));
   });
   if (!list.children.length) list.append(h("div", { class: "empty" }, "No matches."));
 }
 
-document.getElementById("stats").append(
+document.getElementById("stats").append(...[
   h("span", {}, h("b", {}, String(model.cassettes.length)), " cassettes"),
   h("span", {}, h("b", {}, String(model.requests)), " requests"),
+  model.mcpCalls > 0 && h("span", {}, h("b", {}, String(model.mcpCalls)), " MCP calls"),
   h("span", {}, h("b", {}, tokens(totalTokens(model.usage))), " tokens"),
   h("span", {}, h("b", {}, usd(model.cost)), " est. to record"),
-);
+].filter(Boolean));
 document.getElementById("search").addEventListener("input", (e) => {
   renderList(e.target.value);
   const current = Number(location.hash.slice(1) || 0);

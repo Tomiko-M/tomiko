@@ -4,6 +4,7 @@
  * use. Each finding comes with what it costs one live run of the tests, which is also what the
  * same pattern costs your app per conversation like them.
  */
+import { isMcp } from "./compare.js";
 import { readableBody } from "./converse.js";
 import { readContent, stopReason } from "./inspect.js";
 import { canonical } from "./match.js";
@@ -389,7 +390,8 @@ export interface DoctorOptions {
 /** Everything the recordings say could cost less, the costliest first. */
 export function diagnose(cassettes: { path: string; data: CassetteFile }[], options: DoctorOptions = {}): Diagnosis {
   const pricing = { ...defaultPricing, ...options.pricing };
-  const byCassette = cassettes.map((c) => read(c.path, c.data, pricing)).filter((r) => r.length > 0);
+  // Requests to MCP servers cost nothing; positions stay those in the cassette.
+  const byCassette = cassettes.map((c) => read(c.path, c.data, pricing).filter((r) => !isMcp(r.interaction))).filter((r) => r.length > 0);
   const all = byCassette.flat();
   const uncached = new Set<Request>();
   // Requests that repeat an earlier one: their whole cost is the duplicate's, never counted twice.

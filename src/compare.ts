@@ -95,6 +95,8 @@ export interface Side {
 export interface RequestDiff {
   /** 1-based position in the new recording, or in the old one for a request that is gone. */
   index: number;
+  /** A request to an MCP server: which server, which method, and for `tools/call` which tool. */
+  mcp?: { server: string; method: string; tool?: string };
   /** 1-based position in the old recording. */
   beforeIndex?: number;
   status: "added" | "removed" | "changed" | "unchanged";
@@ -108,7 +110,10 @@ export interface RequestDiff {
 }
 
 export interface Totals {
+  /** Requests to models. */
   requests: number;
+  /** Requests to MCP servers, when there were any. */
+  mcp?: number;
   usage: Usage;
   /** USD, or null when no model had a known price. */
   cost: number | null;
@@ -359,8 +364,55 @@ function errorMessage(interaction: Interaction): string {
   return body.type === "text" ? body.value : "";
 }
 
+/** A request to an MCP server, kept as `mcp://<server>/<method>`. */
+export const isMcp = (interaction: Interaction): boolean => interaction.request.method === "MCP" || interaction.meta.provider === "mcp";
+
+function mcpOf(interaction: Interaction): RequestDiff["mcp"] {
+  const match = /^mcp:\/\/([^/]+)\/(.+)$/.exec(interaction.request.url);
+  if (!match) return undefined;
+  const body = interaction.request.body;
+  const tool = match[2] === "tools/call" && isObj(body) ? str(body.name) : undefined;
+  return { server: interaction.meta.server ?? match[1]!, method: match[2]!, ...(tool ? { tool } : {}) };
+}
+
+/**
+ * What an MCP server answered, as text: who it is, for a handshake; its tools, for a listing; a
+ * tool's text content or a resource's text; anything else as JSON.
+ */
+export function mcpResultText(value: unknown, method = ""): string {
+  const exchange = isObj(value) ? value : {};
+  if (isObj(exchange.error)) return `error ${String(exchange.error.code)}: ${String(exchange.error.message)}`;
+  if (isObj(exchange.http)) return `HTTP ${String(exchange.http.status)}`;
+  const result = exchange.result;
+  if (isObj(result) && (method === "initialize" || method === "server/discover")) {
+    const meta = isObj(result._meta) ? result._meta["io.modelcontextprotocol/serverInfo"] : undefined;
+    const info = isObj(result.serverInfo) ? result.serverInfo : isObj(meta) ? meta : {};
+    const version = str(result.protocolVersion) ?? (Array.isArray(result.supportedVersions) ? result.supportedVersions.join(", ") : undefined);
+    return [[str(info.name), str(info.version)].filter(Boolean).join(" "), version && `protocol ${version}`].filter(Boolean).join(" · ");
+  }
+  if (isObj(result) && method === "tools/list" && Array.isArray(result.tools)) {
+    return result.tools.filter(isObj).map((t) => `${String(t.name)}${typeof t.description === "string" ? `: ${t.description}` : ""}`).join("\n");
+  }
+  if (isObj(result) && Array.isArray(result.content) && result.content.length > 0) {
+    return result.content
+      .filter(isObj)
+      .map((part) => {
+        if (typeof part.text === "string") return part.text;
+        if (isObj(part.resource)) return typeof part.resource.text === "string" ? part.resource.text : `[${String(part.resource.uri)}]`;
+        return `[${String(part.type)}]`;
+      })
+      .join("\n");
+  }
+  if (isObj(result) && Array.isArray(result.contents)) return result.contents.filter(isObj).map((c) => (typeof c.text === "string" ? c.text : `[${String(c.uri)}]`)).join("\n");
+  return result === undefined ? "" : JSON.stringify(stable(result));
+}
+
 export function sideOf(interaction: Interaction, pricing: PricingTable): Side {
   const { request, response, meta } = interaction;
+  if (isMcp(interaction)) {
+    const method = /^mcp:\/\/[^/]+\/(.+)$/.exec(request.url)?.[1];
+    return { status: response.status, text: mcpResultText(response.body.type === "json" ? response.body.value : undefined, method), toolCalls: [], cost: null, durationMs: meta.durationMs };
+  }
   const content = readContent(response.body);
   const { model: responseModel, usage } = extractUsage(response.body, response.headers);
   const model = responseModel ?? meta.model ?? requestModel(request);
@@ -420,6 +472,11 @@ function totals(sides: Side[]): Totals {
   };
 }
 
+function withMcp(t: Totals, interactions: Interaction[]): Totals {
+  const mcp = interactions.filter(isMcp).length;
+  return mcp > 0 ? { ...t, mcp } : t;
+}
+
 /**
  * What changed between two recordings of a cassette. Pass `undefined` for a cassette that is new
  * (`before`) or gone (`after`).
@@ -440,14 +497,16 @@ export function diffCassettes(
     const old = ia === undefined ? undefined : a[ia];
     const now = ib === undefined ? undefined : b[ib];
     const { method, url } = (now ?? old)!.request;
-    const base = { index: (ib ?? ia)! + 1, ...(ia === undefined ? {} : { beforeIndex: ia + 1 }), method, url };
+    const mcp = isMcp((now ?? old)!) ? mcpOf((now ?? old)!) : undefined;
+    const base = { index: (ib ?? ia)! + 1, ...(ia === undefined ? {} : { beforeIndex: ia + 1 }), ...(mcp ? { mcp } : {}), method, url };
     if (!old) return { ...base, status: "added", impact: "behavior", after: sidesB[ib!] };
     if (!now) return { ...base, status: "removed", impact: "behavior", before: sidesA[ia!] };
     const sideA = sidesA[ia!]!;
     const sideB = sidesB[ib!]!;
     const request = compareRequests(requestParts(old.request), requestParts(now.request));
     const response = compareResponses(sideA, sideB);
-    const impact = impactOf(request, response);
+    // An MCP server that answers otherwise changes what the agent works with.
+    const impact = mcp && response ? "behavior" : impactOf(request, response);
     return {
       ...base,
       status: impact === "none" ? "unchanged" : "changed",
@@ -465,8 +524,9 @@ export function diffCassettes(
     status,
     impact: worst(requests.map((r) => r.impact)),
     requests,
-    ...(before ? { before: totals(sidesA) } : {}),
-    ...(after ? { after: totals(sidesB) } : {}),
+    // Totals are of the model's requests: what they cost, in tokens, money and time.
+    ...(before ? { before: withMcp(totals(sidesA.filter((_, i) => !isMcp(a[i]!))), a) } : {}),
+    ...(after ? { after: withMcp(totals(sidesB.filter((_, i) => !isMcp(b[i]!))), b) } : {}),
   };
 }
 
