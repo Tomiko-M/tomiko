@@ -1,6 +1,7 @@
 import { CassetteNotFoundError, RequestMismatchError, TomikoError } from "./errors.js";
 import { type Fault, type FaultName, FaultPlan, cutResponse, delay, errorResponse, networkError } from "./faults.js";
 import {
+  abortable,
   buildResponse,
   encodeBody,
   isEventStream,
@@ -18,7 +19,7 @@ import { buildReport, recordReport } from "./report.js";
 import { chosenForRecording, logUsage, modelOverride, shadowed } from "./control.js";
 import { type Misbehavior, MISBEHAVIORS, misbehave } from "./misbehave.js";
 import { JUDGE_HEADER } from "./judge.js";
-import { realFetch } from "./runtime.js";
+import { realFetch, runtime } from "./runtime.js";
 import {
   type Found,
   type Guard,
@@ -147,9 +148,34 @@ function liveHeaders(headers: Headers): Headers {
   return copy;
 }
 
-/** Timeouts, rate limits and server errors: worth retrying, not worth replaying. */
-function isTransient(status: number): boolean {
-  return status === 408 || status === 429 || status >= 500;
+/**
+ * Why an answer is not saved: timeouts, rate limits and server errors are worth retrying, not
+ * replaying, and a missing or wrong key would keep failing after it is fixed.
+ */
+function unsavedReason(status: number): string | undefined {
+  if (status === 408 || status === 429 || status >= 500) return "a transient error";
+  if (status === 401 || status === 403) return "an authentication error";
+  return undefined;
+}
+
+/** `promise`, or the abort of `signal`, whichever comes first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | null): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** Responses recorded as they stream: SSE, and Bedrock's AWS event streams. */
@@ -223,6 +249,7 @@ export class Cassette {
   private readonly guard: Guard | undefined;
   private readonly keys = new WeakMap<RecordedRequest, MatchKey>();
   private report: CassetteReport | undefined;
+  private closing: Promise<CassetteReport> | undefined;
   /** The interactions came from a file, which may predate the secrets guard. */
   private loaded = false;
   /** Interactions in the file when it was opened; later ones were recorded in this run. */
@@ -253,6 +280,17 @@ export class Cassette {
 
   static async open(name: string, options: TomikoOptions = {}): Promise<Cassette> {
     const own = cassettePath(options.dir ?? "__cassettes__", name);
+    // Names keep only letters, digits and a few signs, so two tests can end up in one file, and
+    // each would overwrite the other's recordings.
+    const files = (runtime.files ??= new Map());
+    const other = files.get(own);
+    if (other !== undefined && other !== name) {
+      throw new TomikoError(
+        `Cassettes "${other}" and "${name}" would share the file ${own}, and overwrite each other's recordings. ` +
+          `Give them names that differ in letters or digits, not only in signs such as + * ? or spaces.`,
+      );
+    }
+    files.set(own, name);
     const file = shadowed(own);
     // `tomiko record` picks cassettes to re-record through the environment.
     const mode = chosenForRecording(own) ? "record" : resolveMode(options.mode);
@@ -290,6 +328,7 @@ export class Cassette {
         fault,
         provider: interaction.meta.provider ?? detectProvider(request.url),
         model,
+        requestedModel: requestModel(request),
         usage,
         cost: usage && price ? costOf(usage, price) : null,
         ...readContent(response.body),
@@ -305,6 +344,12 @@ export class Cassette {
   private async handle(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
     let request = new Request(input, init);
+    // As fetch does: an aborted signal fails the request, and an abort later fails reading the body.
+    if (request.signal.aborted) throw request.signal.reason;
+    return abortable(await this.respond(request), request.signal);
+  }
+
+  private async respond(request: Request): Promise<Response> {
     // A judge's request is told apart by a header, which never reaches the API.
     const judging = request.headers.has(JUDGE_HEADER);
     if (judging) {
@@ -470,33 +515,70 @@ export class Cassette {
 
   private async record(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
     const started = Date.now();
-    const res = await this.baseFetch(request);
-    const contentType = res.headers.get("content-type") ?? "";
+    // The entry and the cassette slot are taken before the answer comes, so concurrent requests
+    // are listed and saved in the order they were sent, as a replay serves them.
     const interaction: Interaction = {
       request: recordedRequest,
-      response: {
-        status: res.status,
-        statusText: res.statusText || undefined,
-        headers: pickHeaders(res.headers),
-        body: { type: "empty" },
-      },
+      response: { status: 0, headers: {}, body: { type: "empty" } },
       meta: { provider: detectProvider(request.url, request.headers), recordedAt: new Date().toISOString(), durationMs: 0 },
     };
     const entry: ServedEntry = { interaction, replayed: false };
     this.served.push(entry);
+    this.interactions.push(interaction);
+    this.recorded.push(interaction);
+    this.used.add(interaction);
+
+    // Sent without the caller's signal: an SDK that leaves a stream early aborts its request, and
+    // the answer is still recorded whole. The caller's abort only ends what the caller reads.
+    const sent = this.baseFetch(new Request(request, { signal: null }));
+    let res: Response;
+    try {
+      res = await untilAborted(sent, request.signal);
+    } catch (error) {
+      if (request.signal.aborted) {
+        // The caller gave up before the answer came; it is recorded when it does.
+        this.pending.push(() =>
+          sent.then(
+            (late) => this.capture(interaction, late, started, request.url, request.signal).then((r) => void r.body?.cancel()),
+            (failure: unknown) => this.discard(interaction, failure),
+          ),
+        );
+      } else {
+        this.served.splice(this.served.indexOf(entry), 1);
+        this.forget(interaction);
+      }
+      throw error;
+    }
+    return { response: await this.capture(interaction, res, started, request.url, request.signal), entry };
+  }
+
+  /** Takes `interaction` out of what will be saved. */
+  private forget(interaction: Interaction): void {
+    for (const list of [this.interactions, this.recorded]) {
+      const at = list.indexOf(interaction);
+      if (at !== -1) list.splice(at, 1);
+    }
+  }
+
+  /** Records `res` into `interaction`, and returns the response the caller reads. */
+  private async capture(interaction: Interaction, res: Response, started: number, url: string, signal: AbortSignal | null): Promise<Response> {
+    const contentType = res.headers.get("content-type") ?? "";
+    interaction.response = {
+      status: res.status,
+      statusText: res.statusText || undefined,
+      headers: pickHeaders(res.headers),
+      body: { type: "empty" },
+    };
     const init = { status: res.status, statusText: res.statusText, headers: liveHeaders(res.headers) };
 
-    const keep = !isTransient(res.status) || this.options.recordErrors === true;
-    if (keep) {
-      this.interactions.push(interaction);
-      this.recorded.push(interaction);
-      this.used.add(interaction);
-    } else {
+    const unsaved = this.options.recordErrors === true ? undefined : unsavedReason(res.status);
+    if (unsaved) {
+      this.forget(interaction);
       this.warnings.push(
-        `Not saved: ${res.status} from ${recordedRequest.method} ${recordedRequest.url} is a transient error, ` +
+        `Not saved: ${res.status} from ${interaction.request.method} ${interaction.request.url} is ${unsaved}, ` +
           `so it would replay forever. Set \`recordErrors: true\` to keep it, or simulate it with \`faults\`.`,
       );
-      if (res.body && streaming(contentType)) return { response: withUrl(new Response(res.body, init), request.url), entry };
+      if (res.body && streaming(contentType)) return withUrl(new Response(res.body, init), url);
     }
 
     if (streaming(contentType) && res.body) {
@@ -512,21 +594,21 @@ export class Cassette {
         // A stream that turns out not to be valid frames is kept as the bytes it was.
         sink = eventSink(events, (bytes) => (interaction.response.body = encodeBody(bytes, contentType)));
       }
-      const { stream, settle } = recordStream(res.body, sink);
+      const { stream, settle } = recordStream(res.body, sink, signal);
       this.pending.push(() =>
         settle().then(
           (endedAt) => this.finish(interaction, started, endedAt),
           (error: unknown) => this.discard(interaction, error),
         ),
       );
-      return { response: withUrl(new Response(stream, init), request.url), entry };
+      return withUrl(new Response(stream, init), url);
     }
 
     const bytes = new Uint8Array(await res.arrayBuffer());
     interaction.response.body = encodeBody(bytes, contentType);
     this.finish(interaction, started);
     const body = bytes.byteLength === 0 || [101, 204, 205, 304].includes(res.status) ? null : bytes;
-    return { response: withUrl(new Response(body, init), request.url), entry };
+    return withUrl(new Response(body, init), url);
   }
 
   private finish(interaction: Interaction, started: number, endedAt = Date.now()): void {
@@ -557,8 +639,14 @@ export class Cassette {
    * Throws `SecretsFoundError`, saving nothing, when the cassette would contain a secret.
    */
   async close(): Promise<CassetteReport> {
-    if (this.report) return this.report;
-    await Promise.all(this.pending.map((settle) => settle()));
+    // Concurrent calls share one close; the second would otherwise save the file again.
+    this.closing ??= this.save();
+    return this.closing;
+  }
+
+  private async save(): Promise<CassetteReport> {
+    // Settling can start more of it (an answer that came after its caller gave up).
+    while (this.pending.length > 0) await Promise.all(this.pending.splice(0).map((settle) => settle()));
     let saved = this.recorded.some((i) => this.interactions.includes(i));
     let refused: SecretsFoundError | undefined;
     if (saved) {

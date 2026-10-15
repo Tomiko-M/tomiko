@@ -1,9 +1,12 @@
 import { afterEach, beforeEach } from "vitest";
 import { resetConfig, resetReports } from "../src/index.js";
 
-// Tests talk to fake APIs only. Anything that reaches the real fetch is a test bug.
-globalThis.fetch = async (input) => {
+// Tests talk to fake APIs only, and to servers of their own on this machine. Anything else that
+// reaches the real fetch is a test bug.
+const local = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
   const url = input instanceof Request ? input.url : String(input);
+  if (/^http:\/\/127\.0\.0\.1[:/]/.test(url)) return local(input, init);
   throw new Error(`Test tried to reach the network: ${url}`);
 };
 

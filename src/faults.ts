@@ -1,3 +1,4 @@
+import { TomikoError } from "./errors.js";
 import { frameLength, isAwsEventStream } from "./eventstream.js";
 import { isEventStream } from "./http.js";
 
@@ -56,29 +57,37 @@ export type Fault = FaultTarget &
  * cassette("booking", run, { faults: [fault.rateLimit({ on: 1 }), fault.cutStream({ on: 3 })] });
  * ```
  */
+/** A number option: its default when left out (or `undefined`), otherwise checked. */
+function number(value: number | undefined, fallback: number, name: string, check: (n: number) => boolean, rule: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !check(value)) throw new TomikoError(`\`${name}\` must be ${rule}, got ${String(value)}.`);
+  return value;
+}
+const delayMs = (value: number | undefined, name: string, fallback: number) => number(value, fallback, name, (n) => n >= 0 && Number.isFinite(n), "a number of milliseconds, 0 or more");
+
 export const fault = {
   /** HTTP 429 in the provider's error format. `retryAfterMs` (default 1) keeps SDK retries instant. */
   rateLimit: (options: FaultTarget & { retryAfterMs?: number } = {}): Fault => ({
-    retryAfterMs: 1,
     ...options,
+    retryAfterMs: delayMs(options.retryAfterMs, "retryAfterMs", 1),
     name: "rate_limit",
   }),
   /** Anthropic's 529 overloaded error; 503 for other providers. */
   overloaded: (options: FaultTarget & { retryAfterMs?: number } = {}): Fault => ({
-    retryAfterMs: 1,
     ...options,
+    retryAfterMs: delayMs(options.retryAfterMs, "retryAfterMs", 1),
     name: "overloaded",
   }),
   /** HTTP 500 in the provider's error format. */
   serverError: (options: FaultTarget & { retryAfterMs?: number } = {}): Fault => ({
-    retryAfterMs: 1,
     ...options,
+    retryAfterMs: delayMs(options.retryAfterMs, "retryAfterMs", 1),
     name: "server_error",
   }),
   /** The request fails before any response, like a reset connection: `fetch` rejects. */
   networkError: (options: FaultTarget & { message?: string } = {}): Fault => ({
-    message: "read ECONNRESET",
     ...options,
+    message: options.message ?? "read ECONNRESET",
     name: "network_error",
   }),
   /**
@@ -86,12 +95,12 @@ export const fault = {
    * (default 3), other bodies halfway. A cut during recording still saves the complete response.
    */
   cutStream: (options: FaultTarget & { afterEvents?: number } = {}): Fault => ({
-    afterEvents: 3,
     ...options,
+    afterEvents: number(options.afterEvents, 3, "afterEvents", (n) => Number.isInteger(n) && n >= 0, "a whole number, 0 or more"),
     name: "cut_stream",
   }),
   /** Delays the response by `ms`. Honors the request's abort signal, so client timeouts fire. */
-  latency: (options: FaultTarget & { ms: number }): Fault => ({ ...options, name: "latency" }),
+  latency: (options: FaultTarget & { ms: number }): Fault => ({ ...options, ms: delayMs(options.ms, "ms", 0), name: "latency" }),
 
   // The model misbehaving. The request is answered as usual (replayed, or sent and recorded), and
   // the caller gets the answer rewritten, in the provider's format, streamed or not.
@@ -115,15 +124,19 @@ export const fault = {
   }),
   /** The model declines to answer, with the provider's refusal signal where it has one. */
   refusal: (options: FaultTarget & { message?: string } = {}): Fault => ({
-    message: "I'm sorry, but I can't help with that.",
     ...options,
+    message: options.message ?? "I'm sorry, but I can't help with that.",
     name: "refusal",
   }),
   /**
    * The model stops at the token limit: the answer is cut, `keep` (default 0.5) of the way
    * through, and the stop reason says so. An answer that was a tool call stops inside it.
    */
-  maxTokens: (options: FaultTarget & { keep?: number } = {}): Fault => ({ keep: 0.5, ...options, name: "max_tokens" }),
+  maxTokens: (options: FaultTarget & { keep?: number } = {}): Fault => ({
+    ...options,
+    keep: number(options.keep, 0.5, "keep", (n) => n >= 0 && n <= 1, "a share between 0 and 1"),
+    name: "max_tokens",
+  }),
   /** The model answers with nothing: no text, no tool calls. */
   emptyAnswer: (options: FaultTarget = {}): Fault => ({ ...options, name: "empty_answer" }),
 };
@@ -231,25 +244,35 @@ export function cutResponse(response: Response, afterEvents: number): Response {
 
   const drop = () => new TypeError("terminated", { cause: new Error(`other side closed (${SIMULATED})`) });
 
+  // The connection drops on the read after the cut point: erroring right away would throw away
+  // the last piece before anyone read it.
+  let dropped = false;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (dropped) {
+        void reader.cancel();
+        return controller.error(drop());
+      }
       const { done, value } = await reader.read();
       if (!sse) {
         // A plain body is cut halfway, which needs its full length first.
         if (!done) return void buffered.push(value);
         const all = concat(buffered);
         if (all.byteLength === 0) return controller.close();
-        controller.enqueue(all.subarray(0, Math.floor(all.byteLength / 2)));
-        return controller.error(drop());
+        dropped = true;
+        return controller.enqueue(all.subarray(0, Math.floor(all.byteLength / 2)));
       }
       if (done) return controller.close(); // ended before the cut point
       const before = text.length;
       text += decoder.decode(value, { stream: true });
       const cutAt = nthEventEnd(text, afterEvents);
       if (cutAt === undefined) return controller.enqueue(encoder.encode(text.slice(before)));
+      dropped = true;
       if (cutAt > before) controller.enqueue(encoder.encode(text.slice(before, cutAt)));
-      void reader.cancel();
-      controller.error(drop());
+      else {
+        void reader.cancel();
+        controller.error(drop());
+      }
     },
     cancel(reason) {
       return reader.cancel(reason);

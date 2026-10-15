@@ -9,11 +9,13 @@ const num = (v: unknown): number | undefined => (typeof v === "number" && Number
 export const emptyUsage = (): Usage => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 
 export function addUsage(a: Usage, b: Usage): Usage {
+  const hour = (a.cacheWriteHourTokens ?? 0) + (b.cacheWriteHourTokens ?? 0);
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+    ...(hour ? { cacheWriteHourTokens: hour } : {}),
   };
 }
 
@@ -71,11 +73,14 @@ function normalize(u: Obj): Usage | undefined {
 
   const cacheRead = anthropicCacheRead ?? openaiCached ?? 0;
   const input = isOpenAI ? Math.max(0, (rawInput ?? 0) - (openaiCached ?? 0)) : rawInput ?? 0;
+  // Anthropic splits cache writes by how long they last; an hour costs more than five minutes.
+  const hour = isObj(u.cache_creation) ? num(u.cache_creation.ephemeral_1h_input_tokens) : undefined;
   return {
     inputTokens: input,
     outputTokens: output ?? 0,
     cacheReadTokens: cacheRead,
     cacheWriteTokens: anthropicCacheWrite ?? 0,
+    ...(hour ? { cacheWriteHourTokens: hour } : {}),
   };
 }
 
@@ -129,11 +134,13 @@ function fromHeaders(headers: Record<string, string> | undefined): Usage | undef
 function maxUsage(a: Usage | undefined, b: Usage | undefined): Usage | undefined {
   if (!a) return b;
   if (!b) return a;
+  const hour = Math.max(a.cacheWriteHourTokens ?? 0, b.cacheWriteHourTokens ?? 0);
   return {
     inputTokens: Math.max(a.inputTokens, b.inputTokens),
     outputTokens: Math.max(a.outputTokens, b.outputTokens),
     cacheReadTokens: Math.max(a.cacheReadTokens, b.cacheReadTokens),
     cacheWriteTokens: Math.max(a.cacheWriteTokens, b.cacheWriteTokens),
+    ...(hour ? { cacheWriteHourTokens: hour } : {}),
   };
 }
 

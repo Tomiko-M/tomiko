@@ -101,11 +101,14 @@ export function priceFor(model: string, table: PricingTable): ModelPrice | undef
 export function costOf(usage: Usage, price: ModelPrice): number {
   const cacheRead = price.cacheRead ?? price.input * 0.1;
   const cacheWrite = price.cacheWrite ?? price.input * 1.25;
+  const cacheWriteHour = price.cacheWriteHour ?? price.input * 2;
+  const hour = Math.min(usage.cacheWriteHourTokens ?? 0, usage.cacheWriteTokens);
   return (
     (usage.inputTokens * price.input +
       usage.outputTokens * price.output +
       usage.cacheReadTokens * cacheRead +
-      usage.cacheWriteTokens * cacheWrite) /
+      (usage.cacheWriteTokens - hour) * cacheWrite +
+      hour * cacheWriteHour) /
     1_000_000
   );
 }

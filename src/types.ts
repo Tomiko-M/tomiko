@@ -54,6 +54,8 @@ export interface Usage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Of `cacheWriteTokens`, those cached for an hour, which Anthropic bills at twice the input price. */
+  cacheWriteHourTokens?: number;
 }
 
 export interface InteractionMeta {
@@ -85,6 +87,8 @@ export interface ModelPrice {
   cacheRead?: number;
   /** Defaults to 125% of `input`. */
   cacheWrite?: number;
+  /** Writes to Anthropic's one-hour cache. Defaults to 200% of `input`. */
+  cacheWriteHour?: number;
 }
 
 /**
@@ -211,7 +215,10 @@ export interface RecordedCall {
   /** The simulated fault that hit this request, if any. */
   fault?: FaultName;
   provider?: string;
+  /** The model that answered, as the response names it, or else the one asked for. */
   model?: string;
+  /** The model the request asked for, which may be an alias of the one that answered. */
+  requestedModel?: string;
   usage?: Usage;
   /** Estimated USD cost, or null when there is no usage or no price for the model. */
   cost: number | null;

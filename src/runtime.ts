@@ -13,6 +13,8 @@ interface Runtime {
   /** globalThis.fetch as it was when tomiko first loaded. */
   native: typeof globalThis.fetch;
   dispatch?: typeof globalThis.fetch;
+  /** The cassette name each file was opened under in this process, to catch two names sharing one file. */
+  files?: Map<string, string>;
 }
 
 /**

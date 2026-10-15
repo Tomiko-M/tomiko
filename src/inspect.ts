@@ -22,6 +22,8 @@ export interface ResponseContent {
 }
 
 const ANTHROPIC_TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
+/** Chat Completions choice 0: what clients read when `n` asks for several. */
+const firstChoice = (choice: Obj) => choice.index === undefined || choice.index === 0;
 /** How a Responses API stream ends: with the response, finished, cut short or failed. */
 const FINAL_RESPONSE = new Set(["response.completed", "response.incomplete", "response.failed"]);
 
@@ -79,7 +81,8 @@ function fromBody(o: Obj): ResponseContent {
   }
 
   if (Array.isArray(o.choices)) {
-    for (const choice of o.choices.filter(isObj)) {
+    // With `n` > 1, each choice is an alternative answer; the first is the one clients use.
+    for (const choice of o.choices.filter(isObj).filter(firstChoice).slice(0, 1)) {
       const message = isObj(choice.message) ? choice.message : undefined;
       if (!message) continue;
       if (typeof message.content === "string") text.push(message.content);
@@ -165,7 +168,7 @@ function fromEvents(events: unknown[]): ResponseContent {
     if (Array.isArray(event.candidates)) fromCandidates(event.candidates, text, geminiTools);
 
     if (Array.isArray(event.choices)) {
-      for (const choice of event.choices.filter(isObj)) {
+      for (const choice of event.choices.filter(isObj).filter(firstChoice)) {
         const delta = isObj(choice.delta) ? choice.delta : undefined;
         if (!delta) continue;
         if (typeof delta.content === "string") text.push(delta.content);

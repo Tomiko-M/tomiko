@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -34,7 +35,7 @@ export async function loadCassette(file: string): Promise<CassetteFile | undefin
 /** Writes via a temp file and rename so an interrupted run never leaves a half-written cassette. */
 export async function saveCassette(file: string, data: CassetteFile): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
   await rename(tmp, file);
 }

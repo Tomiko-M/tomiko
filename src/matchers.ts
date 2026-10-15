@@ -149,7 +149,8 @@ export const matchers = {
 
   toHaveUsedModel(this: MatcherContext, received: unknown, model: string | RegExp): MatcherResult {
     const cassette = inspectable(received, "toHaveUsedModel");
-    const models = [...new Set(cassette.calls.map((c) => c.model).filter((m): m is string => m !== undefined))];
+    // The model asked for counts as well as the one that answered: `gpt-4o` answers as `gpt-4o-2024-08-06`.
+    const models = [...new Set(cassette.calls.flatMap((c) => [c.requestedModel, c.model]).filter((m): m is string => m !== undefined))];
     const pass = models.some((m) => (typeof model === "string" ? m === model : model.test(m)));
     return {
       pass,
