@@ -2,6 +2,31 @@
 
 ## 0.3.0 (unreleased)
 
+### Test prompt injection: `fault.promptInjection()`
+
+```ts
+test.each(injectionAttacks)("keeps to its job against %s", async (attack) => {
+  await useCassette(async (c) => {
+    await agent.run("A table for two at 7pm");
+    expect(c).toResistInjection();
+  }, { faults: [fault.promptInjection({ into: "search_tables", attack })] });
+});
+```
+
+- Plants an attack in a tool result the agent sends the model, where your code never sees it, on that turn and every turn after: Anthropic, OpenAI Chat and Responses, Gemini, Bedrock Converse and InvokeModel; JSON stays JSON, and a request signed with SigV4 is signed again
+- Six attacks built in (`tool-hijack`, `ignore-instructions`, `fake-system`, `exfiltrate`, `prompt-leak`, `hidden-text` in invisible Unicode tag characters), or one of your own with `text`; each goes for the agent's most harmful tool by its name, or the one `goal` names
+- `toResistInjection()` fails when the model calls that tool, repeats the attack's marker, links to the attacker's site or recites its system prompt, and says which request did it; it throws when no attack reached the model, rather than pass
+- Attacks are the same on every run, so they record and replay; `tomiko matrix` shows which models fall for them, and the viewer marks the attack, reveals hidden text and says whether the model resisted
+
+### MCP servers in cassettes
+
+- What an agent asks its MCP servers and what they answer is recorded and replayed with the model's answers: tools, resources, prompts, progress and log messages. A replay starts no server
+- Clients of the official SDK (`@modelcontextprotocol/sdk`, and `@modelcontextprotocol/client` from version 2) are recorded without code changes, over stdio, Streamable HTTP, SSE or WebSocket: the OpenAI Agents SDK, Mastra and LangChain's adapters included, protocol discovery on a sibling process too
+- `mcpTransport(transport)` for any other client, such as the AI SDK's over stdio; the AI SDK's own HTTP transport is met in `fetch`
+- A request with no recording goes live in `auto` mode, after tomiko replays the session's handshake to the server
+- `c.mcpCalls` for assertions, an `mcp` line in the summary, MCP cards in the viewer, MCP requests in `diff`, `scan` and `prune`; `doctor` and `record`'s estimate leave them out. `mcp: false` turns it off
+- OpenAI's remote MCP calls (`mcp_call`) count as the model's tool calls
+
 ### Amazon Bedrock
 
 Claude, Amazon Nova, Llama and every other model on Bedrock, recorded and replayed like any other API.
