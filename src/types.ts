@@ -1,4 +1,6 @@
 import type { Fault, FaultName } from "./faults.js";
+import type { Injection } from "./injection.js";
+import type { RpcError } from "./mcp.js";
 import type { JudgeOptions } from "./judge.js";
 
 /**
@@ -63,7 +65,12 @@ export interface InteractionMeta {
   judge?: boolean;
   /** A fault that rewrote this answer for the caller when it was recorded; the answer is the real one. */
   fault?: FaultName;
+  /** Prompt injections `fault.promptInjection()` planted in this request's tool results. */
+  injections?: Injection[];
+  /** `"mcp"` for a request to an MCP server; for a model's API, its name. */
   provider?: string;
+  /** The name an MCP server gives itself. */
+  server?: string;
   model?: string;
   usage?: Usage;
   recordedAt: string;
@@ -137,6 +144,11 @@ export interface TomikoOptions {
   secrets?: SecretAction | SecretsOptions | false;
   /** The model `toMeet()` and `judge()` ask. Default: `claude-haiku-5-5`. */
   judge?: JudgeOptions;
+  /**
+   * Record and replay what MCP servers answer, like the model's answers. Default: true. `false`
+   * leaves MCP servers alone: they are started and asked as if tomiko weren't there.
+   */
+  mcp?: boolean;
 }
 
 /**
@@ -194,6 +206,8 @@ export interface CassetteReport {
   savedCost: number | null;
   /** Models seen without an entry in the pricing table. */
   unpricedModels: string[];
+  /** Requests to MCP servers, when there were any. */
+  mcp?: { replayed: number; recorded: number };
   warnings: string[];
   saved: boolean;
 }
@@ -216,6 +230,8 @@ export interface RecordedCall {
   replayed: boolean;
   /** The simulated fault that hit this request, if any. */
   fault?: FaultName;
+  /** Prompt injections this request carried to the model, planted by `fault.promptInjection()`. */
+  injections?: Injection[];
   provider?: string;
   /** The model that answered, as the response names it, or else the one asked for. */
   model?: string;
@@ -227,4 +243,18 @@ export interface RecordedCall {
   /** The model's text output. */
   text: string;
   toolCalls: ToolCall[];
+}
+
+/** One request to an MCP server in this run, recorded or replayed, as seen by assertions. */
+export interface McpCall {
+  /** The server, as cassettes name it: from its command, its host, or the name it gives itself. */
+  server: string;
+  /** The JSON-RPC method: `tools/call`, `tools/list`, `resources/read`… */
+  method: string;
+  params?: Record<string, unknown>;
+  /** For `tools/call`: the tool and its arguments. */
+  tool?: ToolCall;
+  result?: unknown;
+  error?: RpcError;
+  replayed: boolean;
 }

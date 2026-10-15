@@ -1,5 +1,5 @@
 import { CassetteNotFoundError, RequestMismatchError, TomikoError } from "./errors.js";
-import { type Fault, type FaultName, FaultPlan, cutResponse, delay, errorResponse, networkError } from "./faults.js";
+import { type Fault, type FaultName, FaultPlan, type RequestFault, cutResponse, delay, errorResponse, networkError } from "./faults.js";
 import {
   abortable,
   buildResponse,
@@ -12,6 +12,9 @@ import {
   textSink,
 } from "./http.js";
 import { eventSink, isAwsEventStream } from "./eventstream.js";
+import { type Injection, type InjectionFault, plant } from "./injection.js";
+import type { McpExchange, McpRecorder, McpServer } from "./mcp.js";
+import { isMcpHttp, mcpOverHttp } from "./mcp-http.js";
 import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js";
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
@@ -19,7 +22,7 @@ import { buildReport, recordReport } from "./report.js";
 import { chosenForRecording, logUsage, modelOverride, shadowed } from "./control.js";
 import { type Misbehavior, MISBEHAVIORS, misbehave } from "./misbehave.js";
 import { JUDGE_HEADER } from "./judge.js";
-import { realFetch, runtime } from "./runtime.js";
+import { bypassing, realFetch, runtime } from "./runtime.js";
 import {
   type Found,
   type Guard,
@@ -34,6 +37,7 @@ import { cassettePath, loadCassette, saveCassette } from "./store.js";
 import type {
   CassetteReport,
   Interaction,
+  McpCall,
   Mode,
   PricingTable,
   RecordedCall,
@@ -121,20 +125,28 @@ async function withBedrockModel(request: Request, model: string): Promise<Reques
   const body = request.body ? new Uint8Array(await request.clone().arrayBuffer()) : undefined;
   const headers = new Headers(request.headers);
   headers.delete("content-length");
-  const signature = parseAuthorization(headers.get("authorization"));
-  if (signature) {
-    const credentials = findCredentials(process.env, signature.accessKeyId);
-    if (!credentials) {
-      throw new TomikoError(
-        `To send this request to ${model}, tomiko signs it again, and the AWS credentials it was signed with ` +
-          `(access key ${maskKeyId(signature.accessKeyId)}) are not in AWS_ACCESS_KEY_ID or ~/.aws/credentials. ` +
-          `Set them there, or use a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK.`,
-      );
-    }
-    sign({ method: request.method, url: url.toString(), headers, body, credentials, region: signature.region, service: signature.service, signedHeaders: signature.signedHeaders });
-  }
+  const missing = signAgain(request.method, url.toString(), headers, body);
+  if (missing) throw new TomikoError(unsignable(`To send this request to ${model}`, missing));
   return new Request(url, { method: request.method, headers, body, signal: request.signal });
 }
+
+/**
+ * Signs a request signed with SigV4 again, after a change to its URL or body, which the signature
+ * covers. Returns the access key id it was signed with when its credentials are nowhere to be found.
+ */
+function signAgain(method: string, url: string, headers: Headers, body: string | Uint8Array | undefined): string | undefined {
+  const signature = parseAuthorization(headers.get("authorization"));
+  if (!signature) return undefined;
+  const credentials = findCredentials(process.env, signature.accessKeyId);
+  if (!credentials) return signature.accessKeyId;
+  sign({ method, url, headers, body, credentials, region: signature.region, service: signature.service, signedHeaders: signature.signedHeaders });
+  return undefined;
+}
+
+const unsignable = (doing: string, accessKeyId: string) =>
+  `${doing}, tomiko signs it again, and the AWS credentials it was signed with ` +
+  `(access key ${maskKeyId(accessKeyId)}) are not in AWS_ACCESS_KEY_ID or ~/.aws/credentials. ` +
+  `Set them there, or use a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK.`;
 
 /** Faults that answer for the API, without reaching it. */
 const FAILURES = new Set<FaultName>(["rate_limit", "overloaded", "server_error", "network_error"]);
@@ -190,6 +202,8 @@ interface ServedEntry {
   interaction: Interaction;
   replayed: boolean;
   fault?: FaultName;
+  /** Prompt injections the request carried to the model. */
+  injections?: Injection[];
   /** What the caller got, when a fault rewrote the recorded answer. */
   response?: RecordedResponse;
 }
@@ -230,14 +244,21 @@ function listFindings(found: Found[]): string {
   return shown.join(", ");
 }
 
-export class Cassette {
+export class Cassette implements McpRecorder {
   readonly fetch: typeof globalThis.fetch;
 
   private readonly used = new Set<Interaction>();
   private readonly replayed: Interaction[] = [];
   /** Every request handled in this run, in order, for assertions. */
   private readonly served: ServedEntry[] = [];
+  /** Requests to MCP servers handled in this run, in order. */
+  private readonly mcpServed: { interaction: Interaction; replayed: boolean; server: string }[] = [];
   private readonly faultPlan: FaultPlan;
+  private readonly injections: InjectionFault[];
+  /** Injections that reached the model at least once, to warn about those that never did. */
+  private readonly planted = new Set<InjectionFault>();
+  /** Requests that changed after they were signed, and couldn't be signed again: the access key id. */
+  private readonly unsigned = new WeakMap<Request, string>();
   private readonly recorded: Interaction[] = [];
   /** Streams still being recorded; each is drained and finalized on close. */
   private readonly pending: (() => Promise<void>)[] = [];
@@ -276,7 +297,9 @@ export class Cassette {
     }
     this.baseFetch = options.fetch ?? realFetch();
     this.guard = secretGuard(options.secrets);
-    this.faultPlan = new FaultPlan(options.faults ?? []);
+    const faults = options.faults ?? [];
+    this.injections = faults.filter((f): f is InjectionFault => f.name === "prompt_injection");
+    this.faultPlan = new FaultPlan(faults.filter((f): f is RequestFault => f.name !== "prompt_injection"));
     this.fetch = (input, init) => this.handle(input, init);
   }
 
@@ -315,7 +338,7 @@ export class Cassette {
    */
   get calls(): RecordedCall[] {
     // The judge's requests are not what the code under test did.
-    return this.served.filter((entry) => !entry.interaction.meta.judge).map(({ interaction, replayed, fault, response: rewritten }) => {
+    return this.served.filter((entry) => !entry.interaction.meta.judge).map(({ interaction, replayed, fault, injections, response: rewritten }) => {
       const { request } = interaction;
       // Assertions see what the caller saw.
       const response = rewritten ?? interaction.response;
@@ -329,6 +352,7 @@ export class Cassette {
         status: response.status,
         replayed,
         fault,
+        ...(injections ? { injections } : {}),
         provider: interaction.meta.provider ?? detectProvider(request.url),
         model,
         requestedModel: requestModel(request),
@@ -344,7 +368,90 @@ export class Cassette {
     return this.calls.flatMap((call) => call.toolCalls);
   }
 
+  /** Requests to MCP servers in this run, in order: what the agent asked and what the server answered. */
+  get mcpCalls(): McpCall[] {
+    return this.mcpServed.map(({ interaction, replayed, server }) => {
+      const method = interaction.request.url.slice(`mcp://${server}/`.length);
+      const params = interaction.request.body as Record<string, unknown> | undefined;
+      const outcome = (interaction.response.body.type === "json" ? interaction.response.body.value : {}) as McpExchange;
+      const tool = method === "tools/call" && typeof params?.name === "string" ? { name: params.name, input: params.arguments ?? {} } : undefined;
+      return {
+        server,
+        method,
+        ...(params ? { params } : {}),
+        ...(tool ? { tool } : {}),
+        ...("result" in outcome ? { result: outcome.result } : {}),
+        ...(outcome.error ? { error: outcome.error } : outcome.http ? { error: { code: outcome.http.status, message: `HTTP ${outcome.http.status}` } } : {}),
+        replayed,
+      };
+    });
+  }
+
+  get recordsMcp(): boolean {
+    return this.options.mcp !== false && !this.closed;
+  }
+
+  /** @internal An MCP request: its recorded outcome, or the one `send` gets from the server, recorded. */
+  async mcpExchange(server: McpServer, method: string, params: unknown, send: () => Promise<McpExchange>): Promise<{ exchange: McpExchange; replayed: boolean }> {
+    const request: RecordedRequest = { method: "MCP", url: `mcp://${server.id}/${method}`, ...(params === undefined ? {} : { body: params }) };
+    if (this.missing) {
+      this.failure = "missing";
+      throw new CassetteNotFoundError(this.file);
+    }
+    if (this.mode !== "record") {
+      const found = this.lookup(request);
+      if (found.match) {
+        if (found.warning) this.warnings.push(found.warning);
+        this.mcpServed.push({ interaction: found.match, replayed: true, server: server.id });
+        const body = found.match.response.body;
+        return { exchange: (body.type === "json" ? body.value : {}) as McpExchange, replayed: true };
+      }
+      if (this.mode === "replay") {
+        this.failure ??= "mismatched";
+        throw new RequestMismatchError(
+          request.method,
+          request.url,
+          this.name,
+          found.nearest ? this.describeDiff(found.nearest, request) : null,
+          found.score ?? null,
+        );
+      }
+    }
+    // The slot is taken now, so concurrent requests are saved in the order they were sent.
+    const started = Date.now();
+    const interaction: Interaction = {
+      request,
+      response: { status: 200, headers: {}, body: { type: "empty" } },
+      meta: { provider: "mcp", recordedAt: new Date().toISOString(), durationMs: 0 },
+    };
+    const entry = { interaction, replayed: false, server: server.id };
+    this.mcpServed.push(entry);
+    this.interactions.push(interaction);
+    this.recorded.push(interaction);
+    this.used.add(interaction);
+    let exchange: McpExchange;
+    try {
+      exchange = await send();
+    } catch (error) {
+      this.mcpServed.splice(this.mcpServed.indexOf(entry), 1);
+      this.forget(interaction);
+      throw error;
+    }
+    interaction.response.body = { type: "json", value: exchange };
+    // The server's name is known once it has answered `initialize`.
+    const name = method === "initialize" ? (exchange.result as { serverInfo?: { name?: unknown } } | undefined)?.serverInfo?.name : server.name;
+    interaction.meta = {
+      provider: "mcp",
+      ...(typeof name === "string" && name ? { server: name } : {}),
+      recordedAt: interaction.meta.recordedAt,
+      durationMs: Date.now() - started,
+    };
+    return { exchange, replayed: false };
+  }
+
   private async handle(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    // tomiko's own requests to an MCP server it records.
+    if (bypassing()) return realFetch()(input, init);
     if (this.closed) throw new TomikoError(`Cassette "${this.name}" is already closed.`);
     let request = new Request(input, init);
     // As fetch does: an aborted signal fails the request, and an abort later fails reading the body.
@@ -361,9 +468,16 @@ export class Cassette {
       request = new Request(request, { headers });
     }
     if (!judging && this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
+    // An MCP server over HTTP, reached by a client tomiko doesn't meet at its transport.
+    if (!judging && this.recordsMcp) {
+      const text = request.body ? await request.clone().text() : undefined;
+      if (isMcpHttp(request, text)) return mcpOverHttp(this, request, text, this.baseFetch);
+    }
     // `tomiko matrix` sends the code's requests to another model; the judge keeps its own.
     const model = judging ? undefined : modelOverride();
     if (model) request = await withModel(request, model);
+    let injections: Injection[] | undefined;
+    if (!judging && this.injections.length > 0) ({ request, injections } = await this.inject(request));
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {
@@ -377,7 +491,7 @@ export class Cassette {
     const latency = faults.reduce((ms, f) => ms + (f.name === "latency" ? f.ms : 0), 0);
     if (latency > 0) await delay(latency, request.signal);
     const failure = faults.find((f) => FAILURES.has(f.name));
-    if (failure) return this.fail(failure, request, recordedRequest);
+    if (failure) return this.fail(failure, request, recordedRequest, injections);
     const misbehavior = faults.find((f): f is Misbehavior => MISBEHAVIORS.has(f.name));
 
     if (this.missing) {
@@ -387,6 +501,10 @@ export class Cassette {
     const served = await this.serve(request, recordedRequest);
     const { entry } = served;
     if (judging) entry.interaction.meta.judge = true;
+    if (injections) {
+      entry.injections = injections;
+      if (!entry.replayed) entry.interaction.meta.injections = injections;
+    }
     let response = served.response;
     if (misbehavior) {
       // Reading the real answer to the end also finishes recording it, as it was.
@@ -403,7 +521,31 @@ export class Cassette {
       return cutResponse(response, cut.afterEvents);
     }
     if (latency > 0) entry.fault ??= "latency";
+    if (injections) entry.fault ??= "prompt_injection";
     return response;
+  }
+
+  /** The request with each prompt injection planted in the tool result it goes into, if it carries one. */
+  private async inject(request: Request): Promise<{ request: Request; injections?: Injection[] }> {
+    if (!request.body) return { request };
+    let body: unknown;
+    try {
+      body = JSON.parse(await request.clone().text());
+    } catch {
+      return { request };
+    }
+    const result = plant(body, request.url, this.injections);
+    if (!result) return { request };
+    for (const { fault } of result.planted) this.planted.add(fault);
+    const text = JSON.stringify(result.body);
+    const headers = new Headers(request.headers);
+    headers.delete("content-length");
+    // A Bedrock request signed with SigV4 is signed again; a replay doesn't need it, so missing
+    // credentials only fail a request that goes to the network.
+    const missing = signAgain(request.method, request.url, headers, text);
+    const injected = new Request(request.url, { method: request.method, headers, body: text, signal: request.signal });
+    if (missing) this.unsigned.set(injected, missing);
+    return { request: injected, injections: result.planted.map((p) => p.injection) };
   }
 
   private async serve(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
@@ -431,13 +573,13 @@ export class Cassette {
   }
 
   /** Answers with a simulated failure. Nothing reaches the network and nothing is recorded. */
-  private fail(f: Fault, request: Request, recordedRequest: RecordedRequest): Response {
+  private fail(f: Fault, request: Request, recordedRequest: RecordedRequest, injections?: Injection[]): Response {
     const interaction: Interaction = {
       request: recordedRequest,
       response: { status: 0, headers: {}, body: { type: "empty" } },
       meta: { provider: detectProvider(request.url, request.headers), recordedAt: new Date().toISOString(), durationMs: 0 },
     };
-    this.served.push({ interaction, replayed: false, fault: f.name });
+    this.served.push({ interaction, replayed: false, fault: f.name, ...(injections ? { injections } : {}) });
     if (f.name === "network_error") throw networkError(f.message);
     if (f.name !== "rate_limit" && f.name !== "overloaded" && f.name !== "server_error") {
       throw new TomikoError(`Fault "${f.name}" cannot fail a request.`);
@@ -519,6 +661,8 @@ export class Cassette {
   }
 
   private async record(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
+    const missing = this.unsigned.get(request);
+    if (missing) throw new TomikoError(unsignable("To plant a prompt injection in this Bedrock request", missing));
     const started = Date.now();
     // The entry and the cassette slot are taken before the answer comes, so concurrent requests
     // are listed and saved in the order they were sent, as a replay serves them.
@@ -621,6 +765,7 @@ export class Cassette {
     interaction.meta = {
       ...(interaction.meta.judge ? { judge: true } : {}),
       ...(interaction.meta.fault ? { fault: interaction.meta.fault } : {}),
+      ...(interaction.meta.injections ? { injections: interaction.meta.injections } : {}),
       provider: interaction.meta.provider,
       model: model ?? requestModel(interaction.request),
       usage,
@@ -653,6 +798,13 @@ export class Cassette {
   private async save(): Promise<CassetteReport> {
     // Settling can start more of it (an answer that came after its caller gave up).
     while (this.pending.length > 0) await Promise.all(this.pending.splice(0).map((settle) => settle()));
+    for (const injection of this.injections.filter((f) => !this.planted.has(f))) {
+      const result = injection.result === 1 ? "result" : `result #${injection.result}`;
+      this.warnings.push(
+        `fault.promptInjection() never reached the model in cassette "${this.name}": no request carried ` +
+          `${injection.into ? `a ${result} of ${injection.into}` : `a tool ${result}`}.`,
+      );
+    }
     let saved = this.recorded.some((i) => this.interactions.includes(i));
     let refused: SecretsFoundError | undefined;
     if (saved) {
@@ -685,12 +837,14 @@ export class Cassette {
         );
       }
     }
+    const recorded = this.recorded.filter((i) => this.interactions.includes(i));
     this.report = buildReport({
       name: this.name,
       file: this.file,
       mode: this.mode,
       replayed: this.replayed,
-      recorded: this.recorded.filter((i) => this.interactions.includes(i)),
+      recorded: recorded.filter((i) => i.meta.provider !== "mcp"),
+      mcp: { replayed: this.mcpServed.filter((e) => e.replayed).length, recorded: recorded.filter((i) => i.meta.provider === "mcp").length },
       warnings: this.warnings,
       saved,
       pricing: this.pricing,

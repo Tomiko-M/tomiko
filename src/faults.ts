@@ -1,6 +1,7 @@
 import { TomikoError } from "./errors.js";
 import { frameLength, isAwsEventStream } from "./eventstream.js";
 import { isEventStream } from "./http.js";
+import { type InjectionFault, type InjectionOptions, promptInjection } from "./injection.js";
 
 /** What a fault's `when` filter sees of each request. */
 export interface FaultRequest {
@@ -34,9 +35,11 @@ export type FaultName =
   | "broken_arguments"
   | "refusal"
   | "max_tokens"
-  | "empty_answer";
+  | "empty_answer"
+  | "prompt_injection";
 
-export type Fault = FaultTarget &
+/** A fault that hits some requests, chosen with `on`, `times` and `when`. */
+export type RequestFault = FaultTarget &
   (
     | { name: "rate_limit" | "overloaded" | "server_error"; retryAfterMs: number }
     | { name: "network_error"; message: string }
@@ -48,6 +51,9 @@ export type Fault = FaultTarget &
     | { name: "max_tokens"; keep: number }
     | { name: "empty_answer" }
   );
+
+/** A prompt injection rides with a tool result into every request that carries it, not one request. */
+export type Fault = RequestFault | InjectionFault;
 
 /**
  * Faults to inject into a cassette run, for testing retries and error handling against
@@ -139,17 +145,28 @@ export const fault = {
   }),
   /** The model answers with nothing: no text, no tool calls. */
   emptyAnswer: (options: FaultTarget = {}): Fault => ({ ...options, name: "empty_answer" }),
+
+  /**
+   * A prompt injection in what a tool returned: by default, the agent's first tool result tells
+   * the model to call its most harmful tool. The model sees it on that turn and every turn after;
+   * your code never does. Check the model kept to its job with `toResistInjection()`.
+   *
+   * ```ts
+   * fault.promptInjection({ into: "fetch_page", attack: "exfiltrate" })
+   * ```
+   */
+  promptInjection: (options: InjectionOptions = {}): Fault => promptInjection(options),
 };
 
 /** Decides which faults hit which requests, keeping per-fault hit counts for `times`. */
 export class FaultPlan {
-  private readonly hits = new Map<Fault, number>();
+  private readonly hits = new Map<RequestFault, number>();
   private count = 0;
 
-  constructor(private readonly faults: readonly Fault[]) {}
+  constructor(private readonly faults: readonly RequestFault[]) {}
 
   /** Faults for the next request, in the order they were declared. */
-  next(request: FaultRequest): Fault[] {
+  next(request: FaultRequest): RequestFault[] {
     const n = ++this.count;
     return this.faults.filter((f) => {
       if (f.when && !f.when(request)) return false;

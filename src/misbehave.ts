@@ -3,10 +3,10 @@
  * parse, refusing, stopping at the token limit, saying nothing. The answer is rebuilt in the
  * provider's own format, streamed or not, so SDKs and agents meet it the way they would live.
  */
-import { readableBody } from "./converse.js";
 import { TomikoError } from "./errors.js";
 import { EVENT_STREAM } from "./eventstream.js";
 import type { Fault } from "./faults.js";
+import { offeredTools } from "./injection.js";
 import { readContent } from "./inspect.js";
 import type { RecordedBody, RecordedRequest, RecordedResponse, StreamEvent, Usage } from "./types.js";
 import { extractUsage, requestModel, streamEvents } from "./usage.js";
@@ -59,18 +59,6 @@ function formatOf(body: RecordedBody): Format | undefined {
   };
   if (body.type === "json") return of(body.value);
   return streamEvents(body).map(of).find(Boolean);
-}
-
-/** Tool names the request offers the model. */
-function offeredTools(request: RecordedRequest): string[] {
-  const body = readableBody(request);
-  if (!isObj(body) || !Array.isArray(body.tools)) return [];
-  return body.tools.filter(isObj).flatMap((t) => {
-    const declarations = t.functionDeclarations ?? t.function_declarations;
-    if (Array.isArray(declarations)) return declarations.filter(isObj).map((d) => str(d.name) ?? "");
-    const fn = isObj(t.function) ? t.function : t;
-    return [str(fn.name) ?? ""];
-  }).filter(Boolean);
 }
 
 function baseOf(response: RecordedResponse, request: RecordedRequest): Base {

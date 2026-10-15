@@ -23,7 +23,10 @@ export class RequestMismatchError extends TomikoError {
     readonly diff: string | null,
     readonly similarity: number | null,
   ) {
-    const head = `No recorded interaction in cassette "${cassette}" matches ${method} ${url}.`;
+    const mcp = method === "MCP" ? /^mcp:\/\/([^/]+)\/(.+)$/.exec(url) : null;
+    const head = mcp
+      ? `No recorded request to MCP server "${mcp[1]}" in cassette "${cassette}" matches ${mcp[2]}.`
+      : `No recorded interaction in cassette "${cassette}" matches ${method} ${url}.`;
     const body =
       diff === null
         ? `\nNothing was recorded for this endpoint.`

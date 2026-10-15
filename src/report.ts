@@ -10,6 +10,7 @@ interface ReportInput {
   mode: Mode;
   replayed: Interaction[];
   recorded: Interaction[];
+  mcp?: { replayed: number; recorded: number };
   warnings: string[];
   saved: boolean;
   pricing: PricingTable;
@@ -51,6 +52,7 @@ export function buildReport(input: ReportInput): CassetteReport {
     cost: all.priced > 0 ? all.cost : null,
     savedCost: replayed.priced > 0 ? replayed.cost : null,
     unpricedModels: [...all.unpriced].sort(),
+    ...(input.mcp && input.mcp.replayed + input.mcp.recorded > 0 ? { mcp: { ...input.mcp } } : {}),
     warnings: [...input.warnings],
     saved: input.saved,
   };
@@ -58,7 +60,7 @@ export function buildReport(input: ReportInput): CassetteReport {
 
 /** Cassettes that served nothing (e.g. auto-attached to a test without LLM calls) are left out. */
 export function recordReport(report: CassetteReport): void {
-  if (report.replayed + report.recorded > 0 || report.warnings.length > 0) runtime.reports.push(report);
+  if (report.replayed + report.recorded > 0 || report.mcp || report.warnings.length > 0) runtime.reports.push(report);
 }
 
 /** Reports of every cassette closed in this process that served at least one request, oldest first. */
@@ -74,6 +76,8 @@ export interface Summary {
   cassettes: number;
   replayed: number;
   recorded: number;
+  /** Requests to MCP servers, replayed and recorded. */
+  mcp?: { replayed: number; recorded: number };
   usage: Usage;
   cost: number | null;
   savedCost: number | null;
@@ -89,6 +93,7 @@ export function summary(list: readonly CassetteReport[] = runtime.reports): Summ
     cassettes: list.length,
     replayed: list.reduce((n, r) => n + r.replayed, 0),
     recorded: list.reduce((n, r) => n + r.recorded, 0),
+    mcp: { replayed: list.reduce((n, r) => n + (r.mcp?.replayed ?? 0), 0), recorded: list.reduce((n, r) => n + (r.mcp?.recorded ?? 0), 0) },
     usage: list.reduce((u, r) => addUsage(u, r.usage), emptyUsage()),
     cost: sumNullable(list.map((r) => r.cost)),
     savedCost: sumNullable(list.map((r) => r.savedCost)),
@@ -118,6 +123,10 @@ export function formatSummary(s: Summary = summary(), options: FormatOptions = {
   ];
   if (s.cost !== null) {
     lines.push(`${p.dim("cost  ")}${sep}${n(usd(s.cost))} est.${sep}${p.green(`${usd(s.savedCost ?? 0)} saved by replay`)}`);
+  }
+  const mcp = s.mcp ?? { replayed: 0, recorded: 0 };
+  if (mcp.replayed + mcp.recorded > 0) {
+    lines.push(`${p.dim("mcp   ")}${sep}${n(String(mcp.replayed))} replayed${sep}${n(String(mcp.recorded))} recorded`);
   }
   if (s.unpricedModels.length > 0) lines.push(`${p.dim("no price for")}${sep}${s.unpricedModels.join(", ")}`);
   if (s.warnings.length > 0) {

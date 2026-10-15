@@ -1,6 +1,10 @@
 import { Cassette } from "./cassette.js";
+import { teachMcpSdk } from "./mcp.js";
 import { activate, assertNoActiveCassette, dispatch, mergeOptions, runtime } from "./runtime.js";
 import type { TomikoOptions } from "./types.js";
+
+// Before any test connects to an MCP server, so its traffic can go through cassettes.
+teachMcpSdk();
 
 export { Cassette, resolveMode } from "./cassette.js";
 export { awsRequestHandler, type AwsHandlerOptions, type AwsHttpRequest, type AwsHttpResponse } from "./aws.js";
@@ -23,12 +27,14 @@ export {
 } from "./compare.js";
 export { diagnose, type Diagnosis, type DoctorOptions, type Finding, type FindingKind } from "./doctor.js";
 export { CassetteNotFoundError, NestedCassetteError, RequestMismatchError, TomikoError } from "./errors.js";
-export { fault, type Fault, type FaultName, type FaultRequest, type FaultTarget } from "./faults.js";
+export { fault, type Fault, type FaultName, type FaultRequest, type FaultTarget, type RequestFault } from "./faults.js";
+export { injectionAttacks, type Injection, type InjectionAttack, type InjectionFault, type InjectionOptions } from "./injection.js";
 export type { DiffEntry } from "./match.js";
 export { matchers, type RequestCount, type TomikoMatchers } from "./matchers.js";
 export { defaultPricing, costOf, priceFor } from "./pricing.js";
 export { formatSummary, printSummary, reports, resetReports, summary, type FormatOptions, type Summary } from "./report.js";
 export { judge, type JudgeOptions, type Verdict } from "./judge.js";
+export { mcpTransport, type McpExchange, type McpTransport, type McpTransportOptions, type RpcError, type RpcMessage } from "./mcp.js";
 export { findSecrets, SecretsFoundError } from "./secrets.js";
 export type { Piece } from "./words.js";
 export type * from "./types.js";

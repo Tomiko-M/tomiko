@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { NestedCassetteError } from "./errors.js";
 import type { CassetteReport, TomikoOptions } from "./types.js";
 
@@ -15,6 +16,10 @@ interface Runtime {
   dispatch?: typeof globalThis.fetch;
   /** The cassette name each file was opened under in this process, to catch two names sharing one file. */
   files?: Map<string, string>;
+  /** Set while tomiko itself talks to an MCP server it records: those requests skip the cassette. */
+  bypass?: AsyncLocalStorage<true>;
+  /** The MCP SDK's client has been taught to record its servers. */
+  mcpPatched?: boolean;
 }
 
 /**
@@ -36,9 +41,18 @@ export const runtime: Runtime = (holder[KEY] ??= {
  * during one test (LangChain caches its SDK client lazily, for one) keeps working in the next.
  */
 export const dispatch: typeof globalThis.fetch = (runtime.dispatch ??= (input, init) => {
-  if (runtime.active) return runtime.active.fetch(input, init);
+  if (runtime.active && !bypassing()) return runtime.active.fetch(input, init);
   return realFetch()(input, init);
 });
+
+const bypass = (runtime.bypass ??= new AsyncLocalStorage<true>());
+
+/** Runs `fn` with its requests, and everything they set off, kept out of any cassette. */
+export function bypassed<T>(fn: () => T): T {
+  return bypass.run(true, fn);
+}
+
+export const bypassing = (): boolean => bypass.getStore() === true;
 
 /** The fetch to reach the network: the current global one, unless that is tomiko's dispatcher. */
 export function realFetch(): typeof globalThis.fetch {

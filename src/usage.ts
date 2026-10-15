@@ -256,6 +256,7 @@ export function detectProvider(url: string, headers?: Headers): string | undefin
   } catch {
     return headers?.has("anthropic-version") ? "anthropic" : undefined;
   }
+  if (parsed.protocol === "mcp:") return "mcp";
   const host = parsed.hostname;
   // Before the header: Anthropic's Bedrock SDK sends `anthropic-version` too.
   if (BEDROCK_HOST.test(host) || BEDROCK_PATH.test(parsed.pathname)) return "bedrock";
