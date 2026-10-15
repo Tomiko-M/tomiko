@@ -42,16 +42,19 @@ function sortKeys(value: Json): Json {
   return value;
 }
 
+/** `a.b`, or `a["b.c"]` for a key that would read as a path of its own. */
+const child = (prefix: string, key: string) => (/^[A-Za-z_$][\w$-]*$/.test(key) ? (prefix ? `${prefix}.${key}` : key) : `${prefix}[${JSON.stringify(key)}]`);
+
 /** Flattens a JSON value into `path -> leaf` pairs, e.g. `messages[0].content`. */
 export function flatten(value: Json, prefix = "", out = new Map<string, Json>()): Map<string, Json> {
-  // Empty containers are leaves too, except at the root where they would only add noise.
+  // Empty containers are leaves too, except at the root, where `diff` tells `{}` from `[]`.
   if (Array.isArray(value)) {
     if (value.length === 0 && prefix) out.set(prefix, []);
     value.forEach((item, i) => flatten(item, `${prefix}[${i}]`, out));
   } else if (value !== null && typeof value === "object") {
     const keys = Object.keys(value).sort();
     if (keys.length === 0 && prefix) out.set(prefix, {});
-    for (const key of keys) flatten((value as Record<string, Json>)[key], prefix ? `${prefix}.${key}` : key, out);
+    for (const key of keys) flatten((value as Record<string, Json>)[key], child(prefix, key), out);
   } else {
     out.set(prefix, value);
   }
@@ -114,6 +117,9 @@ export interface DiffEntry {
 
 /** Leaf-level differences going from the recorded value `before` to the live value `after`. */
 export function diff(before: Json, after: Json): DiffEntry[] {
+  // An object and an array with nothing in them flatten alike.
+  const kind = (v: Json) => (Array.isArray(v) ? "array" : v !== null && typeof v === "object" ? "object" : "value");
+  if (kind(before) !== kind(after) && kind(before) !== "value" && kind(after) !== "value") return [{ path: "", kind: "changed", before, after }];
   const fa = flatten(before);
   const fb = flatten(after);
   const entries: DiffEntry[] = [];

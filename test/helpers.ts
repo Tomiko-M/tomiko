@@ -238,7 +238,7 @@ export const keys = {
   google: "AIza" + "Sy" + random(33, 5),
   github: "gh" + "p_" + random(36, 11),
   stripe: "sk_" + "live_" + random(24, 13),
-  slack: "xo" + "xb-" + "1234567890-" + random(24, 17),
+  slack: "xo" + "xb-" + "7365120948-" + random(24, 17),
   aws: "AK" + "IA" + "Z7Q2X3N4M5P6R7S8",
   huggingface: "hf" + "_" + random(34, 19),
   groq: "gs" + "k_" + random(52, 23),

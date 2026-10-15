@@ -223,7 +223,20 @@ function sharedPrefix(previous: unknown[], current: unknown[]): number {
   return n;
 }
 
-function interactionView(interaction: Interaction, index: number, previous: RequestView | undefined, pricing: PricingTable) {
+/** Whether a history message is the previous response sent back, not one written into the request (a prefill). */
+function isResponse(message: MessageView | undefined, response: { text: string; toolCalls: ToolCall[] }): boolean {
+  if (!message || message.role !== "assistant") return false;
+  const text = message.parts.map((p) => (p.kind === "text" ? p.text : "")).join("").trim();
+  const calls = message.parts.flatMap((p) => (p.kind === "tool_call" ? [p.name] : []));
+  return text === response.text.trim() && calls.join("\0") === response.toolCalls.map((t) => t.name).join("\0");
+}
+
+function interactionView(
+  interaction: Interaction,
+  index: number,
+  previous: (RequestView & { response: { text: string; toolCalls: ToolCall[] } }) | undefined,
+  pricing: PricingTable,
+) {
   const { request, response, meta } = interaction;
   const req = requestView(readableBody(request));
   const { model: responseModel, usage } = extractUsage(response.body, response.headers);
@@ -233,7 +246,7 @@ function interactionView(interaction: Interaction, index: number, previous: Requ
   // An agent loop sends the whole history back: the previous request's messages, then the
   // previous response as an assistant message. Only what follows is new.
   const repeatsPreviousResponse =
-    previous !== undefined && earlier === previous.rawMessages.length && req.messages[earlier]?.role === "assistant";
+    previous !== undefined && earlier === previous.rawMessages.length && isResponse(req.messages[earlier], previous.response);
   const fresh = earlier + (repeatsPreviousResponse ? 1 : 0);
   const view: InteractionView = {
     index,
@@ -262,11 +275,11 @@ function interactionView(interaction: Interaction, index: number, previous: Requ
 
 export function cassetteView(path: string, file: CassetteFile, pricing: PricingTable = defaultPricing): CassetteView {
   const interactions: InteractionView[] = [];
-  let previous: RequestView | undefined;
+  let previous: (RequestView & { response: { text: string; toolCalls: ToolCall[] } }) | undefined;
   file.interactions.forEach((interaction, i) => {
     const { view, req } = interactionView(interaction, i + 1, previous, pricing);
     interactions.push(view);
-    previous = req;
+    previous = { ...req, response: view.response };
   });
   const priced = interactions.filter((i) => i.cost !== null);
   const unpriced = interactions.filter((i) => i.usage && i.cost === null).map((i) => i.model ?? "(unknown model)");

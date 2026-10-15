@@ -25,16 +25,65 @@ const tokenize = (text: string) => text.match(TOKEN) ?? [];
 const key = (token: string) => token.trim();
 const isWord = (token: string) => /[\p{L}\p{N}]/u.test(token);
 
-/** Above this many cells the middle of two texts is shown as replaced rather than aligned. */
+/** Up to this many cells two texts are aligned with a full table; longer ones with Myers' diff. */
 const MAX_CELLS = 4_000_000;
+/** Above this many edits, two long texts are shown as replaced rather than aligned. */
+const MAX_EDITS = 2_000;
+
+const replaced = (a: string[], b: string[]): Run[] => [...a.map((text): Run => ({ op: "-", text })), ...b.map((text): Run => ({ op: "+", text }))];
+
+/**
+ * Myers' O(ND) diff: fast when two long texts differ in few places, as two recordings of one
+ * answer do. Undefined beyond `MAX_EDITS` edits.
+ */
+function myers(a: string[], b: string[]): Run[] | undefined {
+  const n = a.length;
+  const m = b.length;
+  const offset = n + m + 1;
+  const v = new Int32Array(2 * offset + 1);
+  /** `v` before each step d, for diagonals -d…d. */
+  const trace: Int32Array[] = [];
+  for (let d = 0; d <= Math.min(n + m, MAX_EDITS); d++) {
+    trace.push(v.slice(offset - d, offset + d + 1));
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!) ? v[offset + k + 1]! : v[offset + k - 1]! + 1;
+      let y = x - k;
+      while (x < n && y < m && key(a[x]!) === key(b[y]!)) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) return backtrack(trace, a, b);
+    }
+  }
+  return undefined;
+}
+
+function backtrack(trace: Int32Array[], a: string[], b: string[]): Run[] {
+  const runs: Run[] = [];
+  let x = a.length;
+  let y = b.length;
+  for (let d = trace.length - 1; d > 0; d--) {
+    const v = trace[d]!;
+    const k = x - y;
+    const down = k === -d || (k !== d && v[k - 1 + d]! < v[k + 1 + d]!);
+    const prevK = down ? k + 1 : k - 1;
+    const prevX = v[prevK + d]!;
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) runs.push({ op: "=", text: b[--y]!, before: a[--x]! });
+    if (down) runs.push({ op: "+", text: b[--y]! });
+    else runs.push({ op: "-", text: a[--x]! });
+  }
+  while (x > 0 && y > 0) runs.push({ op: "=", text: b[--y]!, before: a[--x]! });
+  return runs.reverse();
+}
 
 /** Longest common subsequence of two token lists, as edit pieces. */
 function align(a: string[], b: string[]): Run[] {
   const n = a.length;
   const m = b.length;
-  if (n === 0 || m === 0 || n * m > MAX_CELLS) {
-    return [...a.map((text): Run => ({ op: "-", text })), ...b.map((text): Run => ({ op: "+", text }))];
-  }
+  if (n === 0 || m === 0) return replaced(a, b);
+  if (n * m > MAX_CELLS) return myers(a, b) ?? replaced(a, b);
   const width = m + 1;
   const table = new Uint32Array((n + 1) * width);
   for (let i = n - 1; i >= 0; i--) {

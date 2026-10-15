@@ -133,9 +133,9 @@ export interface DiffOptions {
 /* -------------------------------------------------------------------------------------------- */
 
 /** Values each recording mints anew: message, tool call and response ids. */
-const GENERATED_ID = /^(?:msg|toolu|tooluse|srvtoolu|mcptoolu|call|fc|resp|rs|ws|ci|ctc|chatcmpl|run|step|req)[_-][A-Za-z0-9_-]{6,}$/;
+const GENERATED_ID = /^(?:msg|toolu|tooluse|srvtoolu|mcptoolu|call|fc|resp|rs|ws|ci|ctc|chatcmpl|run|step|req|file|conv|batch|asst|thread|cntr|container)[_-][A-Za-z0-9_-]{6,}$/;
 /** Fields that hold such ids. A tool's own arguments (`"script": "run-unit-tests"`) are left alone. */
-const ID_KEY = /^(?:id|call_id|tool_use_id|tool_call_id|toolUseId|previous_response_id|item_id)$/;
+const ID_KEY = /^(?:id|call_id|tool_use_id|tool_call_id|toolUseId|previous_response_id|item_id|file_id|container|container_id|conversation|conversation_id|batch_id|thread_id|assistant_id|run_id)$/;
 /** Thinking signatures and encrypted reasoning, sent back verbatim in later turns. */
 const OPAQUE = new Set(["signature", "encrypted_content"]);
 
@@ -255,8 +255,8 @@ function requestParts(request: { url: string; body?: unknown }): RequestParts {
 function textChange(before: string, after: string): TextChange | undefined {
   if (before === after) return undefined;
   const { pieces, similarity } = diffWords(before, after);
-  // Only whitespace moved.
-  if (pieces.every((p) => p.op === "=")) return undefined;
+  // Only whitespace moved, or came or went at the end.
+  if (pieces.every((p) => p.op === "=" || !p.text.trim())) return undefined;
   return { before, after, similarity, pieces };
 }
 
@@ -292,6 +292,8 @@ function asData(text: string): unknown {
     if (open === -1 || close <= open || !/^```(?:json)?[ \t]*\r?$/.test(body.slice(0, open))) return undefined;
     body = body.slice(open + 1, close).trim();
   }
+  // A bare JSON value, `true` or `42`, is data too.
+  if (/^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/.test(body)) return JSON.parse(body);
   if (!/^[[{]/.test(body)) return undefined;
   try {
     return JSON.parse(body);
@@ -382,7 +384,13 @@ export function sideOf(interaction: Interaction, pricing: PricingTable): Side {
 function endpoint(interaction: Interaction): string {
   try {
     const url = new URL(interaction.request.url);
-    return `${interaction.request.method} ${url.host}${url.pathname.replace(/\/models\/[^/:]+:/, "/models/*:")}`;
+    // Ids minted per run (`/v1/responses/resp_68a1…`) don't make another endpoint.
+    const path = url.pathname
+      .replace(/\/models\/[^/:]+:/, "/models/*:")
+      .split("/")
+      .map((segment) => (GENERATED_ID.test(segment) ? "<id>" : segment))
+      .join("/");
+    return `${interaction.request.method} ${url.host}${path}`;
   } catch {
     return `${interaction.request.method} ${interaction.request.url}`;
   }

@@ -41,15 +41,31 @@ function compile(pattern: RegExp): RegExp {
 const rule = (r: Rule): Rule => ({ ...r, pattern: compile(r.pattern) });
 
 const PLACEHOLDER =
-  /redacted|example|placeholder|your[-_ ]?(?:api|key|token|secret|password)|dummy|fake|sample|changeme|xxxx|\*{3}|•{3}|\.{3}|…|<[^>]*>|\$\{|\{\{|%s/i;
+  /redacted|example|placeholder|your[-_ ]?(?:[a-z]+[-_ ]?){0,3}(?:api|key|token|secret|password)|dummy|fake|sample|changeme|xxxx|\*{3}|•{3}|\.{3}|…|<[^>]*>|\$\{|\{\{|%s/i;
 
-/** Documentation and fixture values: `sk-ant-xxxxxxxx`, AWS's `…EXAMPLE` keys, `<your key>`. */
-export function isPlaceholder(value: string): boolean {
-  return PLACEHOLDER.test(value) || /(.)\1{5,}/.test(value);
+/** `123456`, `abcdef`: six characters in a row, which a generated key all but never has. */
+function sequential(value: string): boolean {
+  let run = 1;
+  for (let i = 1; i < value.length; i++) {
+    run = value.charCodeAt(i) === value.charCodeAt(i - 1) + 1 && /[a-z0-9]/i.test(value[i]!) ? run + 1 : 1;
+    if (run >= 6) return true;
+  }
+  return false;
 }
 
-/** jwt.io's sample token, which turns up whenever a model explains JWTs. */
+/**
+ * Documentation and fixture values: `sk-ant-xxxxxxxx`, AWS's `…EXAMPLE` keys, `<your key>`,
+ * `sk-1234567890abcdef…`, a short piece repeated.
+ */
+export function isPlaceholder(value: string): boolean {
+  return PLACEHOLDER.test(value) || /(.)\1{5,}/.test(value) || sequential(value) || /^(.{2,16}?)\1+$/.test(value.replace(/^[a-z]+[-_]/i, ""));
+}
+
+/** jwt.io's sample token, which turns up whenever a model explains JWTs, and other famous examples. */
 const KNOWN_EXAMPLES = new Set([
+  // Stripe's documentation keys, in every code sample it ever published.
+  ["sk", "test", "4eC39HqLyjWDarjtT1zdp7dc"].join("_"),
+  ["sk", "test", "BQokikJOvBiI2HlWgH4olfQ2"].join("_"),
   // The access token, refresh token, code and client secret in the OAuth 2.0 spec (RFC 6749).
   "2YotnFZFEjr1zCsicMWpAA",
   "tGzv3JOkF0XG5Qx2TlKWIA",
@@ -63,7 +79,7 @@ const KNOWN_EXAMPLES = new Set([
 ]);
 
 const SECRET_NAME =
-  /(?:^|_)(?:api_?key|secret(?:_?key)?|client_?secret|access_?key|private_?key|(?:access|refresh|auth|bearer|session|id)?_?token|password|passwd|passphrase)$/;
+  /(?:^|_)(?:api_?key|secret(?:_?key)?(?:_?base)?|client_?secret|access_?key|private_?key|(?:encryption|signing|master|account)_?key|(?:access|refresh|auth|bearer|session|id)?_?token|(?:pg|mysql_?)?(?:password|passwd)|(?:db|mysql|admin|user|root|redis)_?pwd|passphrase)$/;
 const COUNTER_NAME = /(?:^|_)(?:max|min|input|output|total|prompt|completion|cache|reasoning|page|next|continuation|cursor|num|count)_?tokens?$/;
 
 /** `ANTHROPIC_API_KEY`, `client_secret`, `refreshToken`, `db.password`; not `max_tokens`. */
@@ -97,10 +113,24 @@ function wordy(value: string): boolean {
 
 const classes = (value: string) => [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((re) => re.test(value)).length;
 
+/** The words demo passwords are made of. */
+const DEMO_WORDS = /^(?:super|secure|strong|my|the|new|admin|root|user|pass|password|passwd|pwd|secret|demo|test|example|sample|welcome|letmein|qwerty|default|changeme|hello|summer|winter|spring|autumn|love|dragon|monkey|master)+$/;
+
+/**
+ * A password made of the words people put in example passwords, with a few digits or signs:
+ * `SecurePass123!`, `P@ssw0rd123`, `Welcome1`. What a model writes in a sample, not a real one.
+ */
+function wordMade(value: string): boolean {
+  // Digits and signs around the words (`123!`) aren't letters in disguise; inside them they are.
+  const core = value.replace(/^[^A-Za-z@$]+|[^A-Za-z]+$/g, "");
+  const letters = core.toLowerCase().replace(/@/g, "a").replace(/0/g, "o").replace(/[1!|]/g, "i").replace(/3/g, "e").replace(/[$5]/g, "s").replace(/7/g, "t");
+  return value.length <= 20 && letters.length >= 4 && DEMO_WORDS.test(letters);
+}
+
 /**
  * Whether a value assigned to a secret-named field is a real secret rather than code, a path, a
  * placeholder or a guessable demo value. Generated secrets mix letters and digits at random;
- * `self.password`, `OAuth2Token` and `postgres123` don't.
+ * `self.password`, `OAuth2Token`, `postgres123` and `SecurePass123!` don't.
  */
 function looksLikeSecret(value: string): boolean {
   if (value.length < 8 || value.length > 4096 || /\s/.test(value)) return false;
@@ -109,40 +139,71 @@ function looksLikeSecret(value: string): boolean {
   if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(value)) return false; // config.apiKey2
   if (/^(?:\/|\.\.?\/|~\/|[A-Za-z]:\\|[a-z][a-z0-9+.-]*:\/\/)/i.test(value)) return false; // paths and URLs
   if (/^[A-Za-z_$][\w$]*$/.test(value) && wordy(value)) return false; // identifiers
-  if (classes(value) < 3 && entropyBits(value) < 40) return false; // guessable
+  if (wordMade(value)) return false; // demo passwords
+  // Guessable: a short value needs three kinds of characters, any value enough randomness.
+  if (entropyBits(value) < (classes(value) >= 3 ? 24 : 40)) return false;
   return true;
+}
+
+/** Passwords everyone uses in examples and local setups. */
+const DEFAULT_PASSWORDS = /^(?:postgres|password|passwd|pass|secret|admin|root|guest|test|user|demo|changeme|mysql|redis|example|letmein|qwerty|123456)\d{0,4}!?$/i;
+
+/** A password in a URL that could be a real one: not the user's own name, a default, or for this machine. */
+function realUrlPassword(secret: string, groups: Groups): boolean {
+  if (/^(?:pass(?:word)?|secret|pwd)$/i.test(secret) || /^\d+\//.test(secret)) return false; // a port and a path
+  if (secret === groups.user || DEFAULT_PASSWORDS.test(secret) || wordMade(secret)) return false;
+  if (/^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\]|(?:[\w-]+\.)*example\.(?:com|org|net))$/i.test(groups.host ?? "")) return false;
+  return entropyBits(secret) >= 24;
 }
 
 const mixed = (secret: string) => /[0-9]/.test(secret) && /[A-Za-z]/.test(secret);
 
+/**
+ * Where a key can start: at a word start, as `\b` says, and also right after an escape written
+ * out in JSON (`\n`, `\t`) or a URL-encoded character (`%3D`), where `\b` sees none.
+ */
+const START = String.raw`(?:(?<![A-Za-z0-9_])|(?<=\\[nrt])|(?<=%[0-9A-Fa-f]{2}))`;
+const at = (source: string) => new RegExp(START + source);
+
 /** Known formats, most specific first: when two rules match the same text, the first one names it. */
 const FORMATS = (
   [
-    { id: "anthropic-api-key", kind: "Anthropic API key", pattern: /\bsk-ant-[a-z]+\d*-[A-Za-z0-9_-]{32,}/, hints: ["sk-ant-"], prefix: /^sk-ant-[a-z]+\d*-/ },
-    { id: "openrouter-api-key", kind: "OpenRouter API key", pattern: /\bsk-or-v\d+-[A-Za-z0-9]{40,}/, hints: ["sk-or-"], prefix: /^sk-or-v\d+-/ },
+    { id: "anthropic-api-key", kind: "Anthropic API key", pattern: at(String.raw`sk-ant-[a-z]+\d*-[A-Za-z0-9_-]{32,}`), hints: ["sk-ant-"], prefix: /^sk-ant-[a-z]+\d*-/ },
+    { id: "openrouter-api-key", kind: "OpenRouter API key", pattern: at(String.raw`sk-or-v\d+-[A-Za-z0-9]{40,}`), hints: ["sk-or-"], prefix: /^sk-or-v\d+-/ },
+    { id: "langfuse-secret-key", kind: "Langfuse secret key", pattern: at(String.raw`sk-lf-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`), hints: ["sk-lf-"], prefix: /^sk-lf-/ },
     {
       id: "openai-api-key",
       kind: "OpenAI API key",
       // Bounded before the marker, so a long run of key-like text can't make the search quadratic.
-      pattern: /\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|[A-Za-z0-9_-]{16,300}?T3BlbkFJ[A-Za-z0-9_-]{16,})/,
+      pattern: at(String.raw`sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|[A-Za-z0-9_-]{16,300}?T3BlbkFJ[A-Za-z0-9_-]{16,})`),
       hints: ["sk-"],
       prefix: /^sk-(?:proj-|svcacct-|admin-)?/,
     },
-    { id: "google-api-key", kind: "Google API key", pattern: /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/, hints: ["AIza"], prefix: /^AIza/ },
-    { id: "groq-api-key", kind: "Groq API key", pattern: /\bgsk_[A-Za-z0-9]{40,}/, hints: ["gsk_"], prefix: /^gsk_/ },
-    { id: "xai-api-key", kind: "xAI API key", pattern: /\bxai-[A-Za-z0-9]{60,}/, hints: ["xai-"], prefix: /^xai-/ },
-    { id: "huggingface-token", kind: "Hugging Face token", pattern: /\bhf_[A-Za-z0-9]{30,}/, hints: ["hf_"], prefix: /^hf_/ },
-    { id: "replicate-api-token", kind: "Replicate API token", pattern: /\br8_[A-Za-z0-9]{30,}/, hints: ["r8_"], prefix: /^r8_/ },
-    { id: "perplexity-api-key", kind: "Perplexity API key", pattern: /\bpplx-[A-Za-z0-9]{40,}/, hints: ["pplx-"], prefix: /^pplx-/ },
+    { id: "google-api-key", kind: "Google API key", pattern: at(String.raw`AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])`), hints: ["AIza"], prefix: /^AIza/ },
+    { id: "google-oauth-token", kind: "Google OAuth token", pattern: at(String.raw`ya29\.[A-Za-z0-9_-]{30,}`), hints: ["ya29."], prefix: /^ya29\./ },
+    { id: "google-client-secret", kind: "Google OAuth client secret", pattern: at(String.raw`GOCSPX-[A-Za-z0-9_-]{28}`), hints: ["GOCSPX-"], prefix: /^GOCSPX-/ },
+    { id: "groq-api-key", kind: "Groq API key", pattern: at(String.raw`gsk_[A-Za-z0-9]{40,}`), hints: ["gsk_"], prefix: /^gsk_/ },
+    { id: "xai-api-key", kind: "xAI API key", pattern: at(String.raw`xai-[A-Za-z0-9]{60,}`), hints: ["xai-"], prefix: /^xai-/ },
+    { id: "huggingface-token", kind: "Hugging Face token", pattern: at(String.raw`hf_[A-Za-z0-9]{30,}`), hints: ["hf_"], prefix: /^hf_/ },
+    { id: "replicate-api-token", kind: "Replicate API token", pattern: at(String.raw`r8_[A-Za-z0-9]{30,}`), hints: ["r8_"], prefix: /^r8_/ },
+    { id: "perplexity-api-key", kind: "Perplexity API key", pattern: at(String.raw`pplx-[A-Za-z0-9]{40,}`), hints: ["pplx-"], prefix: /^pplx-/ },
+    { id: "tavily-api-key", kind: "Tavily API key", pattern: at(String.raw`tvly-(?:[a-z]+-)?[A-Za-z0-9]{24,}`), hints: ["tvly-"], prefix: /^tvly-(?:[a-z]+-)?/, valid: (s) => mixed(s.slice(5)) },
+    { id: "langsmith-api-key", kind: "LangSmith API key", pattern: at(String.raw`lsv2_(?:pt|sk)_[0-9a-f]{32}_[0-9a-f]{10}`), hints: ["lsv2_"], prefix: /^lsv2_(?:pt|sk)_/ },
+    { id: "pinecone-api-key", kind: "Pinecone API key", pattern: at(String.raw`pcsk_[A-Za-z0-9_]{50,}`), hints: ["pcsk_"], prefix: /^pcsk_/ },
+    { id: "fireworks-api-key", kind: "Fireworks API key", pattern: at(String.raw`fw_[A-Za-z0-9]{24,}`), hints: ["fw_"], prefix: /^fw_/, valid: (s) => mixed(s.slice(3)) },
+    { id: "cerebras-api-key", kind: "Cerebras API key", pattern: at(String.raw`csk-[a-z0-9]{40,}`), hints: ["csk-"], prefix: /^csk-/, valid: (s) => mixed(s.slice(4)) },
+    { id: "elevenlabs-api-key", kind: "ElevenLabs API key", pattern: at(String.raw`sk_[0-9a-f]{48}(?![0-9A-Za-z_])`), hints: ["sk_"], prefix: /^sk_/ },
     {
       id: "github-token",
       kind: "GitHub token",
-      pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})/,
+      pattern: at(String.raw`(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})`),
       hints: ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"],
       prefix: /^(?:gh[pousr]_|github_pat_)/,
     },
-    { id: "gitlab-token", kind: "GitLab token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/, hints: ["glpat-"], prefix: /^glpat-/ },
-    { id: "slack-token", kind: "Slack token", pattern: /\bxox[abposr]-[A-Za-z0-9-]{10,}/, hints: ["xox"], prefix: /^xox[a-z]-/ },
+    { id: "gitlab-token", kind: "GitLab token", pattern: at(String.raw`glpat-[A-Za-z0-9_-]{20,}`), hints: ["glpat-"], prefix: /^glpat-/, valid: (s) => mixed(s.slice(6)) },
+    // Real Slack tokens carry their team and user numbers: `xoxb-1234…`, not `xoxb-your-bot-token`.
+    { id: "slack-token", kind: "Slack token", pattern: at(String.raw`xox[abposre](?:\.xox[a-z])?-(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{10,}`), hints: ["xox"], prefix: /^xox[a-z](?:\.xox[a-z])?-/ },
+    { id: "slack-app-token", kind: "Slack app token", pattern: at(String.raw`xapp-\d-[A-Z0-9]+-\d+-[a-f0-9]{30,}`), hints: ["xapp-"], prefix: /^xapp-/ },
     {
       id: "slack-webhook",
       kind: "Slack webhook URL",
@@ -150,10 +211,19 @@ const FORMATS = (
       hints: ["hooks.slack.com"],
       prefix: /^https:\/\/hooks\.slack\.com\/services\//,
     },
-    { id: "stripe-secret-key", kind: "Stripe secret key", pattern: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}/, hints: ["k_live_", "k_test_"], prefix: /^[rs]k_(?:live|test)_/ },
-    { id: "aws-access-key-id", kind: "AWS access key ID", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/, hints: ["AKIA", "ASIA"], prefix: /^(?:AKIA|ASIA)/ },
-    { id: "npm-token", kind: "npm token", pattern: /\bnpm_[A-Za-z0-9]{36}\b/, hints: ["npm_"], prefix: /^npm_/ },
-    { id: "sendgrid-api-key", kind: "SendGrid API key", pattern: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/, hints: ["SG."], prefix: /^SG\./ },
+    {
+      id: "discord-webhook",
+      kind: "Discord webhook URL",
+      pattern: /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]{50,}/,
+      hints: ["/api/webhooks/"],
+      prefix: /^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\//,
+    },
+    { id: "telegram-bot-token", kind: "Telegram bot token", pattern: at(String.raw`\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])`), hints: [":AA"] },
+    { id: "stripe-secret-key", kind: "Stripe secret key", pattern: at(String.raw`[rs]k_(?:live|test)_[A-Za-z0-9]{20,}`), hints: ["k_live_", "k_test_"], prefix: /^[rs]k_(?:live|test)_/ },
+    { id: "stripe-webhook-secret", kind: "Stripe webhook secret", pattern: at(String.raw`whsec_[A-Za-z0-9]{32,}`), hints: ["whsec_"], prefix: /^whsec_/ },
+    { id: "aws-access-key-id", kind: "AWS access key ID", pattern: at(String.raw`(?:AKIA|ASIA)[0-9A-Z]{16}\b`), hints: ["AKIA", "ASIA"], prefix: /^(?:AKIA|ASIA)/ },
+    { id: "npm-token", kind: "npm token", pattern: at(String.raw`npm_[A-Za-z0-9]{36}\b`), hints: ["npm_"], prefix: /^npm_/ },
+    { id: "sendgrid-api-key", kind: "SendGrid API key", pattern: at(String.raw`SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`), hints: ["SG."], prefix: /^SG\./ },
     {
       id: "private-key",
       kind: "Private key",
@@ -164,9 +234,10 @@ const FORMATS = (
       valid: (secret) => !/\.\.\.|…|<[^>]*>/.test(secret) && /[A-Za-z0-9+/]{40,}/.test(secret.replace(/\\[nr]|\s+/g, "")),
       raw: true,
     },
-    { id: "jwt", kind: "JSON Web Token", pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, hints: ["eyJ"], prefix: /^eyJ/ },
+    // Not after a `-` either: in a long run of `eyJ-eyJ-…` each one would start a search to its end.
+    { id: "jwt", kind: "JSON Web Token", pattern: /(?:(?<![A-Za-z0-9_-])|(?<=\\[nrt]))eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, hints: ["eyJ"], prefix: /^eyJ/ },
     // DeepSeek, Moonshot, DashScope and other OpenAI-compatible APIs use plain `sk-` keys.
-    { id: "api-key", kind: "API key", pattern: /\bsk-[A-Za-z0-9]{32,}(?![A-Za-z0-9_-])/, hints: ["sk-"], prefix: /^sk-/, valid: mixed },
+    { id: "api-key", kind: "API key", pattern: at(String.raw`sk-[A-Za-z0-9]{32,}(?![A-Za-z0-9_-])`), hints: ["sk-"], prefix: /^sk-/, valid: mixed },
   ] satisfies Rule[]
 ).map(rule);
 
@@ -175,21 +246,36 @@ const CONTEXTS = (
   [
     { id: "bearer-token", kind: "Bearer token", pattern: /\b[Bb]earer[ \t]+(?<secret>[A-Za-z0-9._~+/-]{20,}=*)/, hints: ["earer"], valid: mixed },
     {
+      id: "basic-auth",
+      kind: "Basic auth credentials",
+      pattern: /\bBasic[ \t]+(?<secret>[A-Za-z0-9+/]{12,}={0,2})(?![A-Za-z0-9+/=])/,
+      hints: ["Basic"],
+      // `user:password`, base64.
+      valid: (secret) => {
+        const decoded = Buffer.from(secret, "base64").toString("utf8");
+        const at = decoded.indexOf(":");
+        return at > 0 && /^[\x20-\x7e]+$/.test(decoded) && realUrlPassword(decoded.slice(at + 1), { user: decoded.slice(0, at) });
+      },
+    },
+    { id: "azure-key", kind: "Azure account key", pattern: /\b(?:AccountKey|SharedAccessKey)=(?<secret>[A-Za-z0-9+/]{40,}={0,2})/, hints: ["AccountKey=", "SharedAccessKey="] },
+    {
       id: "url-password",
       kind: "Password in a URL",
-      pattern: /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/?#@"'<>]{1,256}:(?<secret>[^\s/?#@"'<>]{3,256})@/i,
+      // A password runs to the last `@` before the host, `#` and `/` included.
+      pattern: /\b[a-z][a-z0-9+.-]{0,30}:\/\/(?<user>[^\s:/?#@"'<>]{1,256}):(?<secret>[^\s@"'<>]{3,256})@(?<host>[^\s/?#@"'<>:]{1,256})/i,
       hints: ["://"],
-      valid: (secret) => !/^(?:pass(?:word)?|secret|pwd)$/i.test(secret),
+      valid: (secret, groups) => realUrlPassword(secret, groups),
     },
     {
       id: "assignment",
       kind: "Secret",
       // The lookbehind starts names only at word starts, keeping long unbroken strings linear.
-      // A quoted value runs to its closing quote, whatever it contains; a bare one to the first
-      // character that can't be in one.
+      // A quoted value runs to its closing quote, whatever it contains, a quote escaped inside a
+      // JSON string (`\"`) closing at its escaped twin; a bare one to the first character that
+      // can't be in one.
       pattern:
-        /(?<![A-Za-z0-9_.-])(?<name>[A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:(?<q>["'`])(?<secret>(?:\\.|(?!\k<q>)[^\\\n]){8,4096})\k<q>|(?<bare>[^\s"'`,;&(){}<>[\]\\]{8,}))/,
-      test: /key|secret|token|passw|passphrase/i,
+        /(?<![A-Za-z0-9_.-])(?<name>[A-Za-z_][A-Za-z0-9_.-]*)(?:\\?["'])?[ \t]*[:=][ \t]*(?:\\(?<eq>["'])(?<escaped>[^\\\n"']{8,4096})\\\k<eq>|(?<q>["'`])(?<secret>(?:\\.|(?!\k<q>)[^\\\n]){8,4096})\k<q>|(?<bare>[^\s"'`,;&(){}<>[\]\\]{8,}))/,
+      test: /key|secret|token|passw|passphrase|pwd/i,
       // `token=base64url(random32)`, `key: Map<…>`, `secret = keys[0]`: code, not a value.
       valid: (secret, groups, next) => isSecretName(groups.name ?? "") && looksLikeSecret(secret) && !"(<[".includes(next || "-"),
       named: true,
@@ -269,17 +355,31 @@ function allowed(value: string, guard: Guard): boolean {
   return guard.allow.some((a) => (typeof a === "string" ? a === value : new RegExp(a.source, a.flags.replace(/[gy]/g, "")).test(value)));
 }
 
+/** At the start of a line: the text's start, a line break, or one written out as `\n`. */
+const lineStart = (text: string, at: number) => at === 0 || text[at - 1] === "\n" || (at >= 2 && text.slice(at - 2, at) === "\\n");
+
+/** Where a bare value ends if it runs to the end of its line, without spaces or quotes on the way. */
+function restOfLine(text: string, from: number): number {
+  const rest = /^[^\s"'`\\]*/.exec(text.slice(from, from + 4096))![0];
+  const after = text.slice(from + rest.length, from + rest.length + 2);
+  return after === "" || after[0] === "\n" || after[0] === "\r" || after === "\\n" ? from + rest.length : from;
+}
+
 /** Every secret in `text`, without overlaps. `key` is the JSON field the text is the value of. */
 function scanText(text: string, guard: Guard, key?: string): Hit[] {
   const hits: Hit[] = [];
   const rules = guard.rules;
-  const envPriority = rules.findIndex((r) => CONTEXTS.includes(r));
+  // After every rule: a value that a rule names is named the same with or without your variable,
+  // so a recording redacted on one machine matches on another.
+  const envPriority = rules.length - 0.5;
   rules.forEach((r, priority) => {
     if (r.hints && !r.hints.some((h) => text.includes(h))) return;
     if (r.test && !r.test.test(text)) return;
     for (const m of text.matchAll(r.pattern)) {
       const groups: Groups = m.groups ?? {};
-      const [start, end] = m.indices?.groups?.secret ?? m.indices?.groups?.bare ?? m.indices![0]!;
+      const [start, found] = m.indices?.groups?.secret ?? m.indices?.groups?.escaped ?? m.indices?.groups?.bare ?? m.indices![0]!;
+      // `NAME=value` on a line of its own, as in a .env file: the value is the rest of the line.
+      const end = m.indices?.groups?.bare && lineStart(text, m.index) ? restOfLine(text, found) : found;
       const value = text.slice(start, end);
       const next = text[m.index + m[0].length] ?? "";
       if (value.length === 0 || (!r.raw && isPlaceholder(value)) || (r.valid && !r.valid(value, groups, next))) continue;
@@ -351,6 +451,12 @@ function walk(node: Json, path: string, key: string | undefined, write: (text: s
   } else if (node !== null && typeof node === "object") {
     const record = node as Record<string, Json>;
     for (const k of Object.keys(record)) {
+      // A field's name can be a secret too (a token used as a map key); renaming keeps the order.
+      visit(k, path ? `${path}.${k}` : k, undefined, (name) => {
+        const entries = Object.entries(record);
+        for (const old of Object.keys(record)) delete record[old];
+        for (const [old, value] of entries) record[old === k ? name : old] = value;
+      });
       walk(record[k], path ? `${path}.${k}` : k, k, (text) => (record[k] = text), visit);
     }
   }
@@ -698,6 +804,8 @@ const location = (f: Found) => (f.path ? `${f.part} › ${f.path}` : f.part);
 
 /** One entry per distinct secret, at its first appearance, counting every other place it appears. */
 export function summarize(found: readonly Found[]): (SecretFinding & { value: string })[] {
+  // A secret used as a field name shows up in the path to it: masked there too.
+  const masked = (text: string) => found.reduce((out, f) => out.split(f.hit.value).join(preview(f.hit)), text);
   const byValue = new Map<string, SecretFinding & { value: string }>();
   for (const f of found) {
     const existing = byValue.get(f.hit.value);
@@ -712,7 +820,7 @@ export function summarize(found: readonly Found[]): (SecretFinding & { value: st
       ...(f.hit.env ? { env: f.hit.env } : {}),
       preview: preview(f.hit),
       request: f.interaction + 1,
-      location: location(f),
+      location: masked(location(f)),
       occurrences: 1,
       value: f.hit.value,
     });

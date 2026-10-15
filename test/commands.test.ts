@@ -179,7 +179,7 @@ describe("what the review found", () => {
     const { io, out } = fakeIo(root);
     expect(await main(["diff", "--json"], io)).toBe(0);
     expect(out.join("\n")).not.toContain(keys.github);
-    expect(out.join("\n")).toContain("ghp_…");
+    expect(out.join("\n")).toContain("[REDACTED:github-token]");
   });
 
   it("knows a streamed key is committed", async () => {

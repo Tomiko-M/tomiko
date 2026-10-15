@@ -14,7 +14,7 @@ import {
 import { change, duration, plural, shortModel, tokens, usd } from "../format.js";
 import { changedFiles, EMPTY_TREE, GitError, hasCommits, readAt, repoRoot, resolveRevision } from "../git.js";
 import { canonical, type DiffEntry } from "../match.js";
-import { maskJson, maskSecrets, secretGuard } from "../secrets.js";
+import { maskJson, maskSecrets, redactInteractions, secretGuard } from "../secrets.js";
 import { paint, type Paint, type Span, Spinner, wrapSpans } from "../terminal.js";
 import type { CassetteFile, Usage } from "../types.js";
 import { diffWords, type Piece } from "../words.js";
@@ -480,14 +480,17 @@ export const diff: Command = {
     }
 
     spinner.update(`Comparing ${plural(source.pairs.length, "cassette")}…`);
-    const cassettes = source.pairs.map((pair) => diffCassettes(pair.path, pair.before, pair.after));
+    // For JSON, secrets are taken out before comparing: a key split across the pieces of a word
+    // diff would no longer look like one to mask.
+    const guard = json ? secretGuard("redact", io.env ?? process.env) : undefined;
+    const clean = (c: CassetteFile | undefined) => (c && guard ? { ...c, interactions: redactInteractions(c.interactions, guard).interactions } : c);
+    const cassettes = source.pairs.map((pair) => diffCassettes(pair.path, clean(pair.before), clean(pair.after)));
     const summary = summarizeDiff(cassettes);
     await spinner.stop(undefined, json ? 0 : 500);
     const changed = summary.changed + summary.added + summary.removed;
 
     if (json) {
-      // Every string, masked: the earlier recording may predate the secrets guard.
-      const guard = secretGuard("warn", io.env ?? process.env);
+      // Every string, masked too, paths and urls included.
       io.log(JSON.stringify(maskJson({ base: source.base, summary, cassettes }, guard), null, 2));
       return args.flags["exit-code"] && changed > 0 ? 1 : 0;
     }
