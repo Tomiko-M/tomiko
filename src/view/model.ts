@@ -1,4 +1,5 @@
 import { readableBody } from "../converse.js";
+import type { FaultName } from "../faults.js";
 import { readContent, stopReason } from "../inspect.js";
 import { canonical } from "../match.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
@@ -30,6 +31,8 @@ export interface InteractionView {
   index: number;
   /** A judge's request, not one the code under test made. */
   judge: boolean;
+  /** A fault that rewrote this answer for the test; the response shown is the real one. */
+  fault?: FaultName;
   method: string;
   url: string;
   status: number;
@@ -251,6 +254,7 @@ function interactionView(
   const view: InteractionView = {
     index,
     judge: meta.judge === true,
+    fault: meta.fault,
     method: request.method,
     url: request.url,
     status: response.status,

@@ -26,6 +26,7 @@ A full review of the project found 39 bugs; each fix comes with a test that fail
 - **Secrets:** a redacted recording matches on any machine; keys after `\n`, `%3D` or an escaped quote are found; values are redacted whole; demo credentials (`postgres:postgres@localhost`, `SecurePass123!`) are left alone; more than 30 key formats, Tavily, LangSmith, Pinecone, Google OAuth, Stripe webhooks and Discord webhooks among the new ones
 - **diff:** `--json` never prints a secret; trailing whitespace and ids minted per run aren't changes; long answers that differ in a few words are aligned
 - `toHaveUsedModel` matches the model the request asked for; one-hour Anthropic cache writes are priced at twice the input price; fault options given as `undefined` keep their defaults
+- The viewer marks an answer a misbehavior fault rewrote for the test, so the request after it, carrying the rewritten answer, makes sense; `matrix` wraps long lists of failed tests under themselves
 
 ## 0.2.0 (2026-10-13)
 

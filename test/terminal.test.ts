@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, it } from "vitest";
 import { formatSummary, printSummary, type Summary } from "../src/index.js";
-import { animationEnabled, cassetteFrame, colorEnabled, paint, Spinner } from "../src/terminal.js";
+import { animationEnabled, cassetteFrame, colorEnabled, paint, Spinner, wrapSpans } from "../src/terminal.js";
 
 const tty = { isTTY: true, write: () => true };
 const pipe = { isTTY: false, write: () => true };
@@ -33,6 +33,11 @@ describe("paint", () => {
   it("uses truecolor only where the terminal says it can", () => {
     expect(paint(true, { COLORTERM: "truecolor" }).accent("x")).toBe("\x1b[38;2;240;136;91mx\x1b[39m");
     expect(paint(true, {}).accent("x")).toBe("\x1b[38;5;209mx\x1b[39m");
+  });
+
+  it("wraps colored text without a space left at the end of a line", () => {
+    const p = paint(true, {});
+    expect(wrapSpans([{ text: "one two three", style: p.dim }], 8)).toEqual([p.dim("one two"), p.dim("three")]);
   });
 });
 

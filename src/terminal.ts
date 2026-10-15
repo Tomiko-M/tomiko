@@ -223,5 +223,12 @@ export function wrapSpans(spans: Span[], columns: number): string[] {
       }
     }
   }
-  return lines.map((line) => line.map((s) => (s.style ? s.style(s.text) : s.text)).join("").trimEnd());
+  // Trim before styling, so a styled line doesn't keep its trailing space inside the color codes.
+  return lines.map((line) =>
+    line
+      .map((s, i) => (i === line.length - 1 ? { ...s, text: s.text.trimEnd() } : s))
+      .map((s) => (s.style ? s.style(s.text) : s.text))
+      .join("")
+      .trimEnd(),
+  );
 }

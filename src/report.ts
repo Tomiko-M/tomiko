@@ -121,7 +121,7 @@ export function formatSummary(s: Summary = summary(), options: FormatOptions = {
   }
   if (s.unpricedModels.length > 0) lines.push(`${p.dim("no price for")}${sep}${s.unpricedModels.join(", ")}`);
   if (s.warnings.length > 0) {
-    lines.push(p.yellow(`${s.warnings.length} warning(s):`), ...s.warnings.map((w) => `  ${p.yellow("!")} ${w}`));
+    lines.push(p.yellow(`${s.warnings.length} warning${s.warnings.length === 1 ? "" : "s"}:`), ...s.warnings.map((w) => `  ${p.yellow("!")} ${w}`));
   }
   return lines.join("\n");
 }

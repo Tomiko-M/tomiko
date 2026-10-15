@@ -5,7 +5,7 @@ import { diffCassettes, sideOf } from "../compare.js";
 import { LOG_ENV, MODEL_ENV, readUsage, SHADOW_ENV } from "../control.js";
 import { duration, money, plural, shortModel } from "../format.js";
 import { costOf, defaultPricing, priceFor } from "../pricing.js";
-import { type Paint, Spinner, width } from "../terminal.js";
+import { type Paint, Spinner, width, wrapSpans } from "../terminal.js";
 import type { CassetteFile } from "../types.js";
 import { extractUsage } from "../usage.js";
 import { discoverCassettes } from "../view/discover.js";
@@ -118,13 +118,16 @@ function verdict(p: Paint, rows: Row[], now: Row): string {
   return `${p.accent("◆")} ${p.bold(shortModel(best.model))} passes every test${saving}.`;
 }
 
-function failures(p: Paint, rows: Row[]): string[] {
+function failures(p: Paint, rows: Row[], columns: number): string[] {
   const pad = Math.max(...rows.map((r) => shortModel(r.model).length));
   return rows
     .filter((r) => r.tests && r.tests.failed.length > 0)
-    .map((r) => {
+    .flatMap((r) => {
       const shown = r.tests!.failed.slice(0, 2).join(", ") + (r.tests!.failed.length > 2 ? ` and ${r.tests!.failed.length - 2} more` : "");
-      return `  ${p.red("✖")} ${shortModel(r.model).padEnd(pad)}  ${p.dim(shown)}`;
+      // The failed tests wrap under themselves, beside the model.
+      const indent = 4 + pad + 2;
+      const [first, ...more] = wrapSpans([{ text: shown, style: p.dim }], Math.max(columns - indent, 30));
+      return [`  ${p.red("✖")} ${shortModel(r.model).padEnd(pad)}  ${first ?? ""}`, ...more.map((line) => `${" ".repeat(indent)}${line}`)];
     });
 }
 
@@ -228,7 +231,7 @@ export const matrix: Command = {
       }
 
       for (const line of table(p, rows, now)) io.log(line);
-      const failed = failures(p, rows);
+      const failed = failures(p, rows, io.columns ?? 100);
       if (failed.length > 0) io.log(["", ...failed].join("\n"));
       io.log("");
       io.log(`  ${verdict(p, rows, now)}`);

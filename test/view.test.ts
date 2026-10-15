@@ -55,6 +55,14 @@ describe("view model", () => {
     expect(view.usage.inputTokens).toBe(2000);
   });
 
+  it("marks an answer a fault rewrote for the test", () => {
+    const run = agentRun();
+    run.interactions[0]!.meta = { ...meta, fault: "hallucinated_tool" };
+    const [first, second] = cassetteView("a.json", run).interactions;
+    expect([first!.fault, second!.fault]).toEqual(["hallucinated_tool", undefined]);
+    expect(renderHtml(viewModel("/repo", [{ path: "a.json", data: run }]))).toContain('"fault":"hallucinated_tool"');
+  });
+
   it("reads OpenAI Chat Completions, and lists models without a price", () => {
     const view = cassetteView("b.json", {
       version: 1,

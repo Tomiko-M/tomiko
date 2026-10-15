@@ -53,6 +53,7 @@ h1 { font-size: 18px; margin: 0 0 4px; overflow-wrap: anywhere; }
 .badge.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
 .badge.judge { background: var(--tool-soft); color: var(--tool); border-color: transparent; }
 .badge.cloud { background: var(--cloud-soft); color: var(--cloud); border-color: transparent; }
+.badge.fault { background: transparent; color: var(--bad); border: 1px dashed var(--bad); }
 .spacer { flex: 1; }
 .facts { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .body { padding: 12px 14px; display: grid; gap: 10px; }
@@ -144,6 +145,8 @@ function earlierNote(i, previousIndex) {
   return "History: " + parts.join(" and ") + " from #" + previousIndex;
 }
 
+const camel = (name) => name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+
 function renderInteraction(i, previousIndex) {
   const ok = i.status >= 200 && i.status < 300;
   const response = {
@@ -158,6 +161,7 @@ function renderInteraction(i, previousIndex) {
     h("div", { class: "card-head" },
       h("span", { class: "num" }, "#" + i.index),
       i.judge && h("span", { class: "badge judge" }, "judge"),
+      i.fault && h("span", { class: "badge fault", title: "fault." + camel(i.fault) + "() rewrote this answer for the test. The response shown is the real one; the next request carries the rewritten one." }, "fault · " + i.fault.replace(/_/g, " ")),
       i.provider === "bedrock" && h("span", { class: "badge cloud", title: "Amazon Bedrock" }, "Bedrock"),
       i.model && h("span", { class: "badge mono" }, i.model),
       h("span", { class: "badge " + (ok ? "ok" : "bad") }, String(i.status)),
