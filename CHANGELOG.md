@@ -22,8 +22,9 @@ test.each(injectionAttacks)("keeps to its job against %s", async (attack) => {
 
 - What an agent asks its MCP servers and what they answer is recorded and replayed with the model's answers: tools, resources, prompts, progress and log messages. A replay starts no server
 - Clients of the official SDK (`@modelcontextprotocol/sdk`, and `@modelcontextprotocol/client` from version 2) are recorded without code changes, over stdio, Streamable HTTP, SSE or WebSocket: the OpenAI Agents SDK, Mastra and LangChain's adapters included, protocol discovery on a sibling process too
-- `mcpTransport(transport)` for any other client, such as the AI SDK's over stdio; the AI SDK's own HTTP transport is met in `fetch`
+- `mcpTransport(transport)` for any other client, such as the AI SDK's over stdio; the AI SDK's own HTTP and SSE transports are met in `fetch`
 - A request with no recording goes live in `auto` mode, after tomiko replays the session's handshake to the server
+- Over HTTP, each client keeps a session of its own, a tool call's answer streams as the server sends it (so the client can answer an elicitation on the way, and a replay waits for that answer), and a session the server ended is opened again. Servers are named by their host until they name themselves; JSON-RPC that isn't MCP's, such as an A2A agent's, is recorded as plain HTTP
 - `c.mcpCalls` for assertions, an `mcp` line in the summary, MCP cards in the viewer, MCP requests in `diff`, `scan` and `prune`; `doctor` and `record`'s estimate leave them out. `mcp: false` turns it off
 - OpenAI's remote MCP calls (`mcp_call`) count as the model's tool calls
 

@@ -13,8 +13,8 @@ import {
 } from "./http.js";
 import { eventSink, isAwsEventStream } from "./eventstream.js";
 import { type Injection, type InjectionFault, plant, type PlantState } from "./injection.js";
-import type { McpExchange, McpRecorder, McpServer } from "./mcp.js";
-import { isMcpHttp, mcpOverHttp } from "./mcp-http.js";
+import { type McpExchange, type McpRecorder, type McpServer, slug } from "./mcp.js";
+import { isMcpHttp, maybeSseStream, mcpOverHttp, openSse, peekEvent } from "./mcp-http.js";
 import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js";
 import { readContent } from "./inspect.js";
 import { costOf, defaultPricing, priceFor } from "./pricing.js";
@@ -405,8 +405,12 @@ export class Cassette implements McpRecorder {
     return this.options.mcp !== false && !this.closed;
   }
 
-  /** @internal An MCP request: its recorded outcome, or the one `send` gets from the server, recorded. */
-  async mcpExchange(server: McpServer, method: string, params: unknown, send: () => Promise<McpExchange>): Promise<{ exchange: McpExchange; replayed: boolean }> {
+  /**
+   * @internal An MCP request: its recorded outcome, or the one `send` gets from the server,
+   * recorded. `send` calls `answering` once the answer is on its way to the client, as a stream:
+   * the cassette then waits for the rest of it before it closes.
+   */
+  async mcpExchange(server: McpServer, method: string, params: unknown, send: (answering: () => void) => Promise<McpExchange>): Promise<{ exchange: McpExchange; replayed: boolean }> {
     const request: RecordedRequest = { method: "MCP", url: `mcp://${server.id}/${method}`, ...(params === undefined ? {} : { body: params }) };
     if (this.missing) {
       this.failure = "missing";
@@ -444,30 +448,43 @@ export class Cassette implements McpRecorder {
     this.recorded.push(interaction);
     this.used.add(interaction);
     this.mcpWaiting.add(entry);
-    let exchange: McpExchange;
-    try {
-      exchange = await send();
-    } catch (error) {
-      // A request that failed or was cancelled has no answer to replay.
-      if (this.mcpWaiting.delete(entry)) {
-        this.dropMcp(entry);
-        const reason = error instanceof Error ? error.message : String(error);
-        this.warnings.push(`MCP server "${server.id}" never answered ${method} (${reason}), so it was not saved.`);
-      }
-      throw error;
-    }
-    // The cassette closed while the server was still working, and left the request out.
-    if (!this.mcpWaiting.delete(entry)) return { exchange, replayed: false };
-    interaction.response.body = { type: "json", value: exchange };
-    // The server's name is known once it has answered `initialize`.
-    const name = method === "initialize" ? (exchange.result as { serverInfo?: { name?: unknown } } | undefined)?.serverInfo?.name : server.name;
-    interaction.meta = {
-      provider: "mcp",
-      ...(typeof name === "string" && name ? { server: name } : {}),
-      recordedAt: interaction.meta.recordedAt,
-      durationMs: Date.now() - started,
+    let recorded!: () => void;
+    const settled = new Promise<void>((resolve) => (recorded = resolve));
+    let answering = false;
+    const onAnswer = () => {
+      if (answering) return;
+      answering = true;
+      this.pending.push(() => settled);
     };
-    return { exchange, replayed: false };
+    try {
+      let exchange: McpExchange;
+      try {
+        exchange = await send(onAnswer);
+      } catch (error) {
+        // A request that failed or was cancelled has no answer to replay.
+        if (this.mcpWaiting.delete(entry)) {
+          this.dropMcp(entry);
+          const reason = error instanceof Error ? error.message : String(error);
+          this.warnings.push(`MCP server "${server.id}" never answered ${method} (${reason}), so it was not saved.`);
+        }
+        throw error;
+      }
+      // The cassette closed while the server was still working, and left the request out.
+      if (!this.mcpWaiting.delete(entry)) return { exchange, replayed: false };
+      interaction.response.body = { type: "json", value: exchange };
+      // The server's name is known once it has answered `initialize`.
+      const name = method === "initialize" ? (exchange.result as { serverInfo?: { name?: unknown } } | undefined)?.serverInfo?.name : server.name;
+      interaction.meta = {
+        provider: "mcp",
+        ...(typeof name === "string" && name ? { server: name } : {}),
+        ...(server.transport ? { transport: server.transport } : {}),
+        recordedAt: interaction.meta.recordedAt,
+        durationMs: Date.now() - started,
+      };
+      return { exchange, replayed: false };
+    } finally {
+      recorded();
+    }
   }
 
   private async handle(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -489,10 +506,16 @@ export class Cassette implements McpRecorder {
       request = new Request(request, { headers });
     }
     if (!judging && this.options.intercept && !this.options.intercept(request)) return this.baseFetch(request);
-    // An MCP server over HTTP, reached by a client tomiko doesn't meet at its transport.
-    if (!judging && this.recordsMcp) {
+    // An MCP server over HTTP, reached by a client tomiko doesn't meet at its transport. With
+    // `mcp: false`, it is asked as if tomiko weren't there.
+    let sent: Response | undefined;
+    if (!judging && maybeSseStream(request)) {
+      const stream = await this.sseStream(request);
+      if (stream instanceof Response) return stream;
+      sent = stream?.sent;
+    } else if (!judging) {
       const text = request.body ? await request.clone().text() : undefined;
-      if (isMcpHttp(request, text)) return mcpOverHttp(this, request, text, this.baseFetch);
+      if (isMcpHttp(request, text)) return mcpOverHttp(this.recordsMcp ? this : undefined, request, text, this.baseFetch);
     }
     // `tomiko matrix` sends the code's requests to another model; the judge keeps its own.
     const model = judging ? undefined : modelOverride();
@@ -514,14 +537,17 @@ export class Cassette implements McpRecorder {
     if (latency > 0) await delay(latency, request.signal);
     const failure = faults.find((f) => FAILURES.has(f.name));
     // A simulated failure answers for the API: the model never sees the request, nor its attack.
-    if (failure) return this.fail(failure, request, recordedRequest);
+    if (failure) {
+      await sent?.body?.cancel();
+      return this.fail(failure, request, recordedRequest);
+    }
     const misbehavior = faults.find((f): f is Misbehavior => MISBEHAVIORS.has(f.name));
 
     if (this.missing) {
       this.failure = "missing";
       throw new CassetteNotFoundError(this.file);
     }
-    const served = await this.serve(request, recordedRequest, injections);
+    const served = await this.serve(request, recordedRequest, injections, sent);
     const { entry } = served;
     if (judging) entry.interaction.meta.judge = true;
     // What the model saw is what the answer was given to: a replay's own record of it.
@@ -547,6 +573,32 @@ export class Cassette implements McpRecorder {
     if (latency > 0) entry.fault ??= "latency";
     if (seen) entry.fault ??= "prompt_injection";
     return response;
+  }
+
+  /**
+   * A stream asked for outside any MCP session: the older HTTP+SSE transport's, a Streamable HTTP
+   * client's before its session, or not MCP's at all. The cassette's handshake with the server says
+   * which; without one, the server does, by naming first where to post for the older transport.
+   * Returns the answer, or one not MCP's, sent, to record.
+   */
+  private async sseStream(request: Request): Promise<Response | { sent: Response } | undefined> {
+    // Only MCP's clients send its protocol's version; for the rest, a stream recorded as it was replays as it was.
+    const mcp = request.headers.has("mcp-protocol-version");
+    const url = this.key({ method: "GET", url: redactUrl(request.url) }).url;
+    if (!mcp && this.interactions.some((i) => i.request.method === "GET" && this.key(i.request).url === url)) return undefined;
+    if (mcp && !this.recordsMcp) return this.baseFetch(request);
+    if (this.recordsMcp) {
+      const host = slug(new URL(request.url).hostname);
+      const handshake = this.interactions.find((i) => i.request.method === "MCP" && (i.request.url === `mcp://${host}/initialize` || i.request.url === `mcp://${host}/server/discover`));
+      if (handshake?.meta.transport === "sse") return openSse(request, this.baseFetch);
+      // A Streamable HTTP server, whose session the client hasn't got yet: no stream for it, as a replay can't say whose it would be.
+      if (mcp && (handshake || this.mode === "replay")) return new Response(null, { status: 405, headers: { allow: "POST" } });
+    }
+    if (this.mode === "replay") return undefined;
+    // A stream to record is sent without the caller's signal, as any request being recorded is.
+    const { event, response } = await peekEvent(await this.baseFetch(mcp ? request : new Request(request, { signal: null })));
+    if (event === "endpoint") return this.recordsMcp ? openSse(request, this.baseFetch, response) : response;
+    return mcp ? response : { sent: response };
   }
 
   /** The request with each prompt injection planted in the tool result it goes into, if it carries one. */
@@ -576,10 +628,11 @@ export class Cassette implements McpRecorder {
     return new Map(this.served.flatMap(({ interaction, response }) => readContent((response ?? interaction.response).body).toolCalls.flatMap((t) => (t.id ? [[t.id, t.name] as const] : []))));
   }
 
-  private async serve(request: Request, recordedRequest: RecordedRequest, injections?: Injection[]): Promise<Served> {
+  private async serve(request: Request, recordedRequest: RecordedRequest, injections?: Injection[], sent?: Response): Promise<Served> {
     if (this.mode !== "record") {
       const found = this.lookup(recordedRequest, injections);
       if (found.match) {
+        await sent?.body?.cancel();
         if (found.warning) this.warnings.push(found.warning);
         this.replayed.push(found.match);
         const entry: ServedEntry = { interaction: found.match, replayed: true };
@@ -597,7 +650,7 @@ export class Cassette implements McpRecorder {
         );
       }
     }
-    return this.record(request, recordedRequest);
+    return this.record(request, recordedRequest, sent);
   }
 
   /** Answers with a simulated failure. Nothing reaches the network and nothing is recorded. */
@@ -691,7 +744,7 @@ export class Cassette implements McpRecorder {
     return { nearest, score };
   }
 
-  private async record(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
+  private async record(request: Request, recordedRequest: RecordedRequest, early?: Response): Promise<Served> {
     const missing = this.unsigned.get(request);
     if (missing) throw new TomikoError(unsignable("To plant a prompt injection in this Bedrock request", missing));
     const started = Date.now();
@@ -710,7 +763,7 @@ export class Cassette implements McpRecorder {
 
     // Sent without the caller's signal: an SDK that leaves a stream early aborts its request, and
     // the answer is still recorded whole. The caller's abort only ends what the caller reads.
-    const sent = this.baseFetch(new Request(request, { signal: null }));
+    const sent = early ? Promise.resolve(early) : this.baseFetch(new Request(request, { signal: null }));
     let res: Response;
     try {
       res = await untilAborted(sent, request.signal);

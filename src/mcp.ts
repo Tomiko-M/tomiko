@@ -56,6 +56,8 @@ export interface McpTransportOptions {
    * HTTP, or the name it gives itself.
    */
   name?: string;
+  /** @internal The older HTTP+SSE transport, as tomiko carries it for a client met in fetch. */
+  transport?: "sse";
 }
 
 /** An MCP request's outcome, as a cassette keeps it. */
@@ -74,6 +76,8 @@ export interface McpServer {
   id: string;
   /** The name it gives itself, once it has. */
   name?: string;
+  /** `"sse"` over the older HTTP+SSE transport. */
+  transport?: "sse";
 }
 
 /** What a cassette does for MCP sessions. */
@@ -81,8 +85,11 @@ export interface McpRecorder {
   readonly name: string;
   /** False when the cassette leaves MCP alone (`mcp: false`). */
   readonly recordsMcp: boolean;
-  /** Replays the request's outcome, or gets it with `send` and records it. */
-  mcpExchange(server: McpServer, method: string, params: unknown, send: () => Promise<McpExchange>): Promise<{ exchange: McpExchange; replayed: boolean }>;
+  /**
+   * Replays the request's outcome, or gets it with `send` and records it. `send` calls `answering`
+   * once the answer is on its way to the client as a stream, so the cassette waits for all of it.
+   */
+  mcpExchange(server: McpServer, method: string, params: unknown, send: (answering: () => void) => Promise<McpExchange>): Promise<{ exchange: McpExchange; replayed: boolean }>;
 }
 
 /** Requests that set a session up, replayed to the server before a request goes live in a replayed session. */
@@ -152,11 +159,18 @@ export function nameOf(transport: object): string | undefined {
   const t = transport as Record<string, unknown>;
   const params = (t._serverParams ?? t.serverParams) as { command?: unknown; args?: unknown } | undefined;
   if (params && typeof params.command === "string") return nameFromCommand(params.command, Array.isArray(params.args) ? params.args.map(String) : []);
+  const host = hostOf(transport);
+  return host === undefined ? undefined : slug(host);
+}
+
+/** The host of the server a transport reaches over the network. */
+function hostOf(transport: object): string | undefined {
+  const t = transport as Record<string, unknown>;
   for (const url of [t._url, t.url]) {
-    if (url instanceof URL) return slug(url.hostname);
+    if (url instanceof URL) return url.hostname;
     if (typeof url === "string") {
       try {
-        return slug(new URL(url).hostname);
+        return new URL(url).hostname;
       } catch {
         // Not a URL.
       }
@@ -210,15 +224,24 @@ class Session {
   private notifiedClose = false;
   private counter = 0;
 
+  /** Named after its host, which may serve others too: the name the server gives itself goes first. */
+  private readonly byHost: boolean;
+  private readonly kind: "sse" | undefined;
+
   constructor(
     readonly transport: McpTransport,
     options: McpTransportOptions,
   ) {
     this.id = options.name ? slug(options.name) : nameOf(transport);
+    this.kind = options.transport;
+    const host = hostOf(transport);
+    this.byHost = !options.name && host !== undefined && this.id === slug(host);
   }
 
   get server(): McpServer {
-    return { id: this.id ?? (this.serverName ? slug(this.serverName) : "mcp"), ...(this.serverName ? { name: this.serverName } : {}) };
+    const name = this.serverName ? slug(this.serverName) : undefined;
+    const id = (this.byHost ? name : undefined) ?? this.id ?? name ?? "mcp";
+    return { id, ...(this.serverName ? { name: this.serverName } : {}), ...(this.kind ? { transport: this.kind } : {}) };
   }
 
   /** Starts nothing yet: the real transport starts when a message has to reach the server. */
@@ -334,7 +357,13 @@ class Session {
   /** The real transport, started, and its server through the handshake. */
   private async live(): Promise<void> {
     await this.started();
-    if (this.replayedHandshake && !this.initialized) await (this.handshaking ??= this.handshake());
+    if (this.replayedHandshake && !this.initialized) {
+      await (this.handshaking ??= this.handshake().catch((error: unknown) => {
+        // The next request tries again.
+        this.handshaking = undefined;
+        throw error;
+      }));
+    }
   }
 
   /** The client's handshake, as it sent it, replayed to the server; the server's answers go no further. */

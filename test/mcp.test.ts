@@ -276,7 +276,8 @@ describe("a server over Streamable HTTP", () => {
       }, { dir, mode, fetch: mode === "replay" ? offline : undefined });
     expect(await run(http.url, "auto")).toBe("eggs, milk");
     expect(http.requests.filter((r) => r.startsWith("POST"))).toEqual(["POST initialize", "POST notifications/initialized", "POST tools/call"]);
-    expect(saved(dir).interactions.map((i) => i.request.url)).toEqual(["mcp://127.0.0.1/initialize", "mcp://127.0.0.1/tools/call"]);
+    // The server is named by its host until it names itself.
+    expect(saved(dir).interactions.map((i) => i.request.url)).toEqual(["mcp://127.0.0.1/initialize", "mcp://notes-server/tools/call"]);
     await http.close();
     closing = undefined;
     // Another port: a server started for each test run gets one, and the recording still matches.
@@ -300,7 +301,12 @@ describe("the AI SDK's MCP client", () => {
     const recorded = await run(http.url, "auto");
     expect(recorded.names).toEqual(["read_note", "add_note", "count"]);
     expect(recorded.out).toMatchObject({ content: [{ type: "text", text: "call the plumber" }] });
-    expect(saved(dir).interactions.every((i) => i.request.url.startsWith("mcp://127.0.0.1/"))).toBe(true);
+    expect(saved(dir).interactions.map((i) => i.request.url)).toEqual([
+      "mcp://127.0.0.1/server/discover",
+      "mcp://127.0.0.1/initialize",
+      "mcp://notes-server/tools/list",
+      "mcp://notes-server/tools/call",
+    ]);
     const sent = http.requests.length;
     await http.close();
     closing = undefined;
@@ -325,7 +331,7 @@ describe("the AI SDK's MCP client", () => {
     const before = http.requests.length;
     expect(await read("todo", "groceries")).toEqual(["call the plumber", "eggs, milk"]);
     // The server heard the client's handshake again, from tomiko, then the new request, in that session.
-    expect(http.requests.slice(before).filter((r) => r.startsWith("POST"))).toEqual(["POST server/discover", "POST initialize", "POST notifications/initialized", "POST tools/call"]);
+    expect(http.requests.slice(before).filter((r) => r.startsWith("POST"))).toEqual(["POST initialize", "POST notifications/initialized", "POST tools/call"]);
   });
 
   it("over stdio, with the model calling its tools: both recorded, both replayed", async () => {

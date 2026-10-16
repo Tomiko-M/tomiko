@@ -523,7 +523,7 @@ credentials for them.
 Clients of the official SDK, `@modelcontextprotocol/sdk` or `@modelcontextprotocol/client` from
 version 2, are recorded without code changes, over stdio, Streamable HTTP, SSE or a WebSocket. That
 covers the OpenAI Agents SDK, Mastra and LangChain's MCP adapters. The AI SDK's `createMCPClient`
-is recorded over HTTP as it is; over stdio, wrap its transport:
+is recorded over HTTP and SSE as it is; over stdio, wrap its transport:
 
 ```ts
 import { createMCPClient } from "@ai-sdk/mcp";
@@ -545,8 +545,14 @@ const kitchen = await createMCPClient({
   recorded in a session that was replayed until then.
 - **Matching** is by server, method and params: `mcp://kitchen/tools/call` with the tool's name and
   arguments. A server is named after the package or script its command runs
-  (`npx -y @modelcontextprotocol/server-filesystem .` is `server-filesystem`), its host over HTTP,
-  or what you call it: `mcpTransport(transport, { name: "kitchen" })`.
+  (`npx -y @modelcontextprotocol/server-filesystem .` is `server-filesystem`), or what you call it:
+  `mcpTransport(transport, { name: "kitchen" })`. Over HTTP, it goes by its host until it names
+  itself in its answer to `initialize`, so two servers on one host keep their answers apart.
+- **Over HTTP,** each client keeps a session of its own. A replayed one gets an id from tomiko; when
+  a request in it has to go live, tomiko opens a session with the server for it, and opens another
+  if the server ends that one. A tool call's answer streams to the client as the server sends it,
+  so the client can answer what the server asks it on the way (elicitation, sampling), and a
+  replay waits for that answer too.
 - **A connection opened before a test,** in `beforeAll`, reaches the server for its handshake; what
   it asks during a test goes in that test's cassette. To replay the handshake too, connect in a
   cassette of its own: `beforeAll(() => cassette("kitchen", () => client.connect(transport)))`.
@@ -567,7 +573,7 @@ const kitchen = await createMCPClient({
 | **LangChain.js** | `ChatAnthropic`, `ChatOpenAI`, `ChatBedrockConverse`, bound tools | none ² |
 | **MCP SDK** (`@modelcontextprotocol/sdk`, `/client` 2.x) | stdio and Streamable HTTP servers: tools, resources, progress, logs, protocol discovery | none |
 | **OpenAI Agents SDK** | agents with `MCPServerStdio`, on the Responses API | none |
-| **AI SDK MCP client** | `createMCPClient` over HTTP, and over stdio | `mcpTransport` for stdio |
+| **AI SDK MCP client** | `createMCPClient` over HTTP, SSE and stdio, elicitation | `mcpTransport` for stdio |
 | **Anything on `fetch`** | | none |
 
 <sub>¹ For a client created once at module load, pass `fetch` from `tomiko`, see

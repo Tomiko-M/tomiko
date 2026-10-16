@@ -71,6 +71,8 @@ export interface InteractionMeta {
   provider?: string;
   /** The name an MCP server gives itself. */
   server?: string;
+  /** `"sse"` for an MCP server over the older HTTP+SSE transport, whose stream a replay answers. */
+  transport?: "sse";
   model?: string;
   usage?: Usage;
   recordedAt: string;

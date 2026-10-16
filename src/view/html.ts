@@ -146,7 +146,7 @@ function usageFacts(u, cost) {
 }
 
 /** Text hidden in Unicode tag characters, which no one sees and models read. */
-const HIDDEN = /[\u{E0020}-\u{E007E}]+/gu;
+const HIDDEN = /[\\u{E0020}-\\u{E007E}]+/gu;
 const reveal = (t) => [...t].map((c) => String.fromCharCode(c.codePointAt(0) - 0xE0000)).join("");
 
 function revealHidden(text) {
@@ -247,7 +247,7 @@ function renderInteraction(i, previousIndex) {
 
 /** JSON a tool returned as text, laid out to read. */
 function pretty(text) {
-  if (!/^\s*[[{]/.test(text)) return text;
+  if (!/^\\s*[[{]/.test(text)) return text;
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 }
 
