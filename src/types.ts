@@ -222,6 +222,11 @@ export interface ToolCall {
 
 /** One request a cassette served during this run, recorded or replayed, as seen by assertions. */
 export interface RecordedCall {
+  /**
+   * Where the request is in the cassette, counting from 1, as `tomiko view` and `diff` number it.
+   * Undefined for a simulated failure, which is never recorded.
+   */
+  position?: number;
   method: string;
   url: string;
   requestBody: unknown;

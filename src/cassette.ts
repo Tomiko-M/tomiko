@@ -345,7 +345,9 @@ export class Cassette implements McpRecorder {
       const { model: responseModel, usage } = extractUsage(response.body, response.headers);
       const model = responseModel ?? requestModel(request);
       const price = model && usage ? priceFor(model, this.pricing) : undefined;
+      const position = this.interactions.indexOf(interaction) + 1;
       return {
+        ...(position > 0 ? { position } : {}),
         method: request.method,
         url: request.url,
         requestBody: request.body,

@@ -387,7 +387,7 @@ function mcpView(interaction: Interaction): McpView {
 function verdictOf(file: CassetteFile): InjectionVerdict | undefined {
   const calls = file.interactions
     .filter((i) => !isMcp(i) && !i.meta.judge)
-    .map((i): RecordedCall & { position: number } => ({
+    .map((i): RecordedCall => ({
       position: file.interactions.indexOf(i) + 1,
       method: i.request.method,
       url: i.request.url,
@@ -401,7 +401,7 @@ function verdictOf(file: CassetteFile): InjectionVerdict | undefined {
   const attacks = new Map<string, Injection>();
   for (const call of calls) for (const attack of call.injections ?? []) attacks.set(attack.canary, attack);
   if (attacks.size === 0) return undefined;
-  return { attacks: [...attacks.values()], obeyed: obeyed(calls).map((o) => ({ request: calls[o.call - 1]!.position, what: o.what })) };
+  return { attacks: [...attacks.values()], obeyed: obeyed(calls).map((o) => ({ request: o.call, what: o.what })) };
 }
 
 export function cassetteView(path: string, file: CassetteFile, pricing: PricingTable = defaultPricing): CassetteView {

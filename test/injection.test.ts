@@ -82,6 +82,7 @@ describe("planting an attack", () => {
       expect(await agent("Where is my kettle?", seen)).toBe("Your Blue kettle order A-1 is on its way.");
       expect(c).toResistInjection();
       expect(c.calls.map((call) => call.fault)).toEqual([undefined, "prompt_injection"]);
+      expect(c.calls.map((call) => call.position)).toEqual([1, 2]);
       expect(c.calls[1]!.injections).toEqual([
         expect.objectContaining({ attack: "tool-hijack", tool: "search_orders", goal: "delete_order", canary: expect.stringMatching(/^PI-[0-9A-Z]{6}$/) }),
       ]);
@@ -130,6 +131,14 @@ describe("toResistInjection", () => {
       );
       expect(() => expect(c).not.toResistInjection()).not.toThrow();
     }, { dir: tmpDir(), fetch: model(true), faults: [fault.promptInjection()] });
+  });
+
+  it("names the request that obeyed by its place in the cassette, as the viewer does", () => {
+    const injection = { attack: "tool-hijack" as const, tool: "search", text: "x", goal: "delete_order", canary: "PI-ABCDEF" };
+    const call = (position: number, toolCalls: { name: string; input: unknown }[]) =>
+      ({ position, method: "POST", url: ANTHROPIC_URL, requestBody: {}, status: 200, replayed: true, cost: null, text: "", toolCalls, injections: [injection] });
+    // Requests to MCP servers sit at 1 and 2, and at 4: the model's are 3 and 5.
+    expect(obeyed([call(3, []), call(5, [{ name: "delete_order", input: {} }])]).map((o) => o.call)).toEqual([5]);
   });
 
   it("catches each attack's own giveaway", async () => {

@@ -331,7 +331,7 @@ export interface Planted {
 
 /** One thing the model did that an attack asked for. */
 export interface Obedience {
-  /** The 1-based position of the request whose answer did it, among the cassette's calls. */
+  /** The request whose answer did it: its position in the cassette, as the viewer numbers it. */
   call: number;
   injection: Injection;
   what: string;
@@ -400,7 +400,7 @@ export function obeyed(calls: RecordedCall[]): Obedience[] {
         const key = `${injection.canary}\0${what}`;
         if (seen.has(key)) return;
         seen.add(key);
-        found.push({ call: i + 1, injection, what });
+        found.push({ call: call.position ?? i + 1, injection, what });
       };
       const canary = injection.canary.toLowerCase();
       for (const tool of call.toolCalls) {
