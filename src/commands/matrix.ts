@@ -123,10 +123,14 @@ function failures(p: Paint, rows: Row[], columns: number): string[] {
   return rows
     .filter((r) => r.tests && r.tests.failed.length > 0)
     .flatMap((r) => {
-      const shown = r.tests!.failed.slice(0, 2).join(", ") + (r.tests!.failed.length > 2 ? ` and ${r.tests!.failed.length - 2} more` : "");
-      // The failed tests wrap under themselves, beside the model.
+      const failed = r.tests!.failed;
+      const rest = failed.length > 2 ? `and ${failed.length - 2} more` : undefined;
+      const together = failed.slice(0, 2).join(", ") + (rest ? ` ${rest}` : "");
+      // The failed tests go beside the model, on one line if they fit, else one a line under each other.
       const indent = 4 + pad + 2;
-      const [first, ...more] = wrapSpans([{ text: shown, style: p.dim }], Math.max(columns - indent, 30));
+      const room = Math.max(columns - indent, 30);
+      const items = width(together) <= room ? [together] : [...failed.slice(0, 2), ...(rest ? [rest] : [])];
+      const [first, ...more] = items.flatMap((item) => wrapSpans([{ text: item, style: p.dim }], room));
       return [`  ${p.red("✖")} ${shortModel(r.model).padEnd(pad)}  ${first ?? ""}`, ...more.map((line) => `${" ".repeat(indent)}${line}`)];
     });
 }

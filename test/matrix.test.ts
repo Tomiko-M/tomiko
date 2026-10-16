@@ -137,6 +137,19 @@ describe("tomiko matrix", () => {
     ]);
   });
 
+  it("lists failed tests one a line when they don't fit on one", async () => {
+    const p = await recorded();
+    p.io.columns = 60;
+    expect(await main(["matrix", "--models", "gpt-5-nano", "--yes"], p.io)).toBe(0);
+    const at = p.out.findIndex((l) => l.includes("✖"));
+    expect(p.out.slice(at, at + 4)).toEqual([
+      "  ✖ gpt-5-nano  agent.test.ts > tells the weather",
+      "                agent.test.ts > plans a trip",
+      "                and 1 more",
+      "",
+    ]);
+  });
+
   it("can keep each model's cassettes, and asks before spending", async () => {
     const p = await recorded();
     expect(await main(["matrix", "--models", "gpt-5-nano"], p.io)).toBe(1);
