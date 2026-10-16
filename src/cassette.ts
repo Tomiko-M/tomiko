@@ -12,7 +12,7 @@ import {
   textSink,
 } from "./http.js";
 import { eventSink, isAwsEventStream } from "./eventstream.js";
-import { type Injection, type InjectionFault, plant } from "./injection.js";
+import { type Injection, type InjectionFault, plant, type PlantState } from "./injection.js";
 import type { McpExchange, McpRecorder, McpServer } from "./mcp.js";
 import { isMcpHttp, mcpOverHttp } from "./mcp-http.js";
 import { canonical, diff, formatDiff, similarity, stripPaths } from "./match.js";
@@ -208,6 +208,14 @@ interface ServedEntry {
   response?: RecordedResponse;
 }
 
+/** A request to an MCP server in this run. */
+interface McpServed {
+  interaction: Interaction;
+  replayed: boolean;
+  /** The server's id in the cassette: the host of the `mcp://` URL. */
+  server: string;
+}
+
 interface Served {
   response: Response;
   entry: ServedEntry;
@@ -252,11 +260,15 @@ export class Cassette implements McpRecorder {
   /** Every request handled in this run, in order, for assertions. */
   private readonly served: ServedEntry[] = [];
   /** Requests to MCP servers handled in this run, in order. */
-  private readonly mcpServed: { interaction: Interaction; replayed: boolean; server: string }[] = [];
+  private readonly mcpServed: McpServed[] = [];
+  /** MCP requests sent to a server and not answered yet; one still waiting at close is not saved. */
+  private readonly mcpWaiting = new Set<McpServed>();
   private readonly faultPlan: FaultPlan;
   private readonly injections: InjectionFault[];
   /** Injections that reached the model at least once, to warn about those that never did. */
   private readonly planted = new Set<InjectionFault>();
+  /** Where each injection went: it stays in that result on every turn after. */
+  private readonly plantState: PlantState = { sites: new Map(), known: (id) => this.toolNames().get(id) };
   /** Requests that changed after they were signed, and couldn't be signed again: the access key id. */
   private readonly unsigned = new WeakMap<Request, string>();
   private readonly recorded: Interaction[] = [];
@@ -426,19 +438,26 @@ export class Cassette implements McpRecorder {
       response: { status: 200, headers: {}, body: { type: "empty" } },
       meta: { provider: "mcp", recordedAt: new Date().toISOString(), durationMs: 0 },
     };
-    const entry = { interaction, replayed: false, server: server.id };
+    const entry: McpServed = { interaction, replayed: false, server: server.id };
     this.mcpServed.push(entry);
     this.interactions.push(interaction);
     this.recorded.push(interaction);
     this.used.add(interaction);
+    this.mcpWaiting.add(entry);
     let exchange: McpExchange;
     try {
       exchange = await send();
     } catch (error) {
-      this.mcpServed.splice(this.mcpServed.indexOf(entry), 1);
-      this.forget(interaction);
+      // A request that failed or was cancelled has no answer to replay.
+      if (this.mcpWaiting.delete(entry)) {
+        this.dropMcp(entry);
+        const reason = error instanceof Error ? error.message : String(error);
+        this.warnings.push(`MCP server "${server.id}" never answered ${method} (${reason}), so it was not saved.`);
+      }
       throw error;
     }
+    // The cassette closed while the server was still working, and left the request out.
+    if (!this.mcpWaiting.delete(entry)) return { exchange, replayed: false };
     interaction.response.body = { type: "json", value: exchange };
     // The server's name is known once it has answered `initialize`.
     const name = method === "initialize" ? (exchange.result as { serverInfo?: { name?: unknown } } | undefined)?.serverInfo?.name : server.name;
@@ -479,7 +498,8 @@ export class Cassette implements McpRecorder {
     const model = judging ? undefined : modelOverride();
     if (model) request = await withModel(request, model);
     let injections: Injection[] | undefined;
-    if (!judging && this.injections.length > 0) ({ request, injections } = await this.inject(request));
+    let plantedFaults: InjectionFault[] = [];
+    if (!judging && this.injections.length > 0) ({ request, injections, faults: plantedFaults } = await this.inject(request));
 
     const bodyText = request.body ? await request.clone().text() : undefined;
     const recordedRequest: RecordedRequest = {
@@ -493,20 +513,22 @@ export class Cassette implements McpRecorder {
     const latency = faults.reduce((ms, f) => ms + (f.name === "latency" ? f.ms : 0), 0);
     if (latency > 0) await delay(latency, request.signal);
     const failure = faults.find((f) => FAILURES.has(f.name));
-    if (failure) return this.fail(failure, request, recordedRequest, injections);
+    // A simulated failure answers for the API: the model never sees the request, nor its attack.
+    if (failure) return this.fail(failure, request, recordedRequest);
     const misbehavior = faults.find((f): f is Misbehavior => MISBEHAVIORS.has(f.name));
 
     if (this.missing) {
       this.failure = "missing";
       throw new CassetteNotFoundError(this.file);
     }
-    const served = await this.serve(request, recordedRequest);
+    const served = await this.serve(request, recordedRequest, injections);
     const { entry } = served;
     if (judging) entry.interaction.meta.judge = true;
-    if (injections) {
-      entry.injections = injections;
-      if (!entry.replayed) entry.interaction.meta.injections = injections;
-    }
+    // What the model saw is what the answer was given to: a replay's own record of it.
+    const seen = entry.replayed ? entry.interaction.meta.injections : injections;
+    if (seen) entry.injections = seen;
+    if (injections && !entry.replayed) entry.interaction.meta.injections = injections;
+    if (seen) for (const fault of plantedFaults) this.planted.add(fault);
     let response = served.response;
     if (misbehavior) {
       // Reading the real answer to the end also finishes recording it, as it was.
@@ -523,22 +545,21 @@ export class Cassette implements McpRecorder {
       return cutResponse(response, cut.afterEvents);
     }
     if (latency > 0) entry.fault ??= "latency";
-    if (injections) entry.fault ??= "prompt_injection";
+    if (seen) entry.fault ??= "prompt_injection";
     return response;
   }
 
   /** The request with each prompt injection planted in the tool result it goes into, if it carries one. */
-  private async inject(request: Request): Promise<{ request: Request; injections?: Injection[] }> {
-    if (!request.body) return { request };
+  private async inject(request: Request): Promise<{ request: Request; injections?: Injection[]; faults: InjectionFault[] }> {
+    if (!request.body) return { request, faults: [] };
     let body: unknown;
     try {
       body = JSON.parse(await request.clone().text());
     } catch {
-      return { request };
+      return { request, faults: [] };
     }
-    const result = plant(body, request.url, this.injections);
-    if (!result) return { request };
-    for (const { fault } of result.planted) this.planted.add(fault);
+    const result = plant(body, request.url, this.injections, this.plantState);
+    if (!result) return { request, faults: [] };
     const text = JSON.stringify(result.body);
     const headers = new Headers(request.headers);
     headers.delete("content-length");
@@ -547,12 +568,17 @@ export class Cassette implements McpRecorder {
     const missing = signAgain(request.method, request.url, headers, text);
     const injected = new Request(request.url, { method: request.method, headers, body: text, signal: request.signal });
     if (missing) this.unsigned.set(injected, missing);
-    return { request: injected, injections: result.planted.map((p) => p.injection) };
+    return { request: injected, injections: result.planted.map((p) => p.injection), faults: result.planted.map((p) => p.fault) };
   }
 
-  private async serve(request: Request, recordedRequest: RecordedRequest): Promise<Served> {
+  /** Tools the model called in the answers served so far, by call id. */
+  private toolNames(): Map<string, string> {
+    return new Map(this.served.flatMap(({ interaction, response }) => readContent((response ?? interaction.response).body).toolCalls.flatMap((t) => (t.id ? [[t.id, t.name] as const] : []))));
+  }
+
+  private async serve(request: Request, recordedRequest: RecordedRequest, injections?: Injection[]): Promise<Served> {
     if (this.mode !== "record") {
-      const found = this.lookup(recordedRequest);
+      const found = this.lookup(recordedRequest, injections);
       if (found.match) {
         if (found.warning) this.warnings.push(found.warning);
         this.replayed.push(found.match);
@@ -575,13 +601,13 @@ export class Cassette implements McpRecorder {
   }
 
   /** Answers with a simulated failure. Nothing reaches the network and nothing is recorded. */
-  private fail(f: Fault, request: Request, recordedRequest: RecordedRequest, injections?: Injection[]): Response {
+  private fail(f: Fault, request: Request, recordedRequest: RecordedRequest): Response {
     const interaction: Interaction = {
       request: recordedRequest,
       response: { status: 0, headers: {}, body: { type: "empty" } },
       meta: { provider: detectProvider(request.url, request.headers), recordedAt: new Date().toISOString(), durationMs: 0 },
     };
-    this.served.push({ interaction, replayed: false, fault: f.name, ...(injections ? { injections } : {}) });
+    this.served.push({ interaction, replayed: false, fault: f.name });
     if (f.name === "network_error") throw networkError(f.message);
     if (f.name !== "rate_limit" && f.name !== "overloaded" && f.name !== "server_error") {
       throw new TomikoError(`Fault "${f.name}" cannot fail a request.`);
@@ -625,7 +651,7 @@ export class Cassette implements McpRecorder {
    * Without an exact match, the most similar recording for the same endpoint is the candidate
    * for a fuzzy replay or for the mismatch error.
    */
-  private lookup(req: RecordedRequest): Lookup {
+  private lookup(req: RecordedRequest, injections?: Injection[]): Lookup {
     const live = this.key(req);
     const endpoint = this.interactions.filter((i) => i.request.method === req.method && this.key(i.request).url === live.url);
     const exact = endpoint.filter((i) => this.key(i.request).canonical === live.canonical);
@@ -652,7 +678,10 @@ export class Cassette implements McpRecorder {
     if (!nearest) return {};
     // A response from a different model is never an acceptable stand-in, however similar the prompt.
     const sameModel = requestModel(nearest.request) === requestModel(req);
-    if (this.fuzzy !== false && score >= this.fuzzy && sameModel) {
+    // Nor is an answer to a request without the attack this one carries, or with another.
+    const attacks = (list: Injection[] | undefined) => (list ?? []).map((i) => i.canary).sort().join();
+    const sameAttacks = attacks(nearest.meta.injections) === attacks(injections);
+    if (this.fuzzy !== false && score >= this.fuzzy && sameModel && sameAttacks) {
       this.used.add(nearest);
       const warning =
         `Fuzzy match (${Math.round(score * 100)}% similar) in cassette "${this.name}" ` +
@@ -701,6 +730,13 @@ export class Cassette implements McpRecorder {
       throw error;
     }
     return { response: await this.capture(interaction, res, started, request.url, request.signal), entry };
+  }
+
+  /** Takes an MCP request out of what will be saved, and out of `mcpCalls`. */
+  private dropMcp(entry: McpServed): void {
+    const at = this.mcpServed.indexOf(entry);
+    if (at !== -1) this.mcpServed.splice(at, 1);
+    this.forget(entry.interaction);
   }
 
   /** Takes `interaction` out of what will be saved. */
@@ -800,6 +836,16 @@ export class Cassette implements McpRecorder {
   private async save(): Promise<CassetteReport> {
     // Settling can start more of it (an answer that came after its caller gave up).
     while (this.pending.length > 0) await Promise.all(this.pending.splice(0).map((settle) => settle()));
+    // Saved without its answer, it would replay as an empty success.
+    for (const entry of this.mcpWaiting) {
+      this.dropMcp(entry);
+      const method = entry.interaction.request.url.slice(`mcp://${entry.server}/`.length);
+      this.warnings.push(
+        `MCP server "${entry.server}" had not answered ${method} when cassette "${this.name}" closed, so it was not saved. ` +
+          `Await the call before the test ends.`,
+      );
+    }
+    this.mcpWaiting.clear();
     for (const injection of this.injections.filter((f) => !this.planted.has(f))) {
       const result = injection.result === 1 ? "result" : `result #${injection.result}`;
       this.warnings.push(
@@ -859,7 +905,8 @@ export class Cassette implements McpRecorder {
       exists: this.loaded,
       size: this.size,
       used: this.interactions.flatMap((interaction, i) => (i < this.size && this.used.has(interaction) ? [i] : [])),
-      recorded: this.report.recorded,
+      // MCP requests count too: `tomiko record` lists the cassettes it re-recorded by this.
+      recorded: recorded.length,
       mismatched: this.failure === "mismatched",
       missing: this.failure === "missing",
     });

@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { TomikoError } from "./errors.js";
-import { bypassed, runtime } from "./runtime.js";
+import { bypassed, runtime, unbypassed } from "./runtime.js";
 
 export type RpcId = string | number;
 
@@ -88,6 +88,7 @@ export interface McpRecorder {
 /** Requests that set a session up, replayed to the server before a request goes live in a replayed session. */
 const HANDSHAKE = new Set(["initialize", "server/discover"]);
 const INITIALIZED = "notifications/initialized";
+const CANCELLED = "notifications/cancelled";
 /** JSON-RPC's code for an error inside the server, used when tomiko can't answer for it. */
 const INTERNAL_ERROR = -32603;
 
@@ -124,11 +125,20 @@ const LAUNCHERS = /^(npx|pnpx|bunx|uvx|uv|pipx|node|nodejs|deno|bun|python\d*(\.
 const SUBCOMMANDS = new Set(["run", "exec", "dlx", "x", "tool", "start", "serve"]);
 const base = (path: string) => path.split(/[\\/]/).pop()!.replace(/\.(m?[jt]s|c[jt]s|py|exe|cmd|sh|jar)$/i, "");
 
+/** Flags whose value is not what runs: an environment variable, a volume, a container's name… */
+const VALUED = new Set(["-e", "--env", "--env-file", "-v", "--volume", "--mount", "--name", "-w", "--workdir", "--network", "--entrypoint", "-u", "--user", "--platform", "--from", "--with", "--python", "-C", "--cwd", "--prefix"]);
+
 /** `server-filesystem` for `npx -y @modelcontextprotocol/server-filesystem /data`. */
 export function nameFromCommand(command: string, args: readonly string[] = []): string {
   const program = base(command);
   if (!LAUNCHERS.test(program)) return slug(program);
-  const positional = args.filter((a) => !a.startsWith("-") && !SUBCOMMANDS.has(a) && !a.includes("="));
+  // A shell running a command: `cmd /c npx …`, `sh -c "npx …"`.
+  if (/^cmd$/i.test(program) && /^\/[a-z]$/i.test(args[0] ?? "") && args[1]) return nameFromCommand(args[1], args.slice(2));
+  if (/^(sh|bash)$/i.test(program) && /^-[a-z]*c$/.test(args[0] ?? "") && args[1]) {
+    const [inner, ...rest] = args[1].trim().split(/\s+/);
+    if (inner) return nameFromCommand(inner, rest);
+  }
+  const positional = args.filter((a, i) => !a.startsWith("-") && !SUBCOMMANDS.has(a) && !a.includes("=") && !VALUED.has(args[i - 1] ?? ""));
   // A package, an image or a script (`@scope/pkg`, `ghcr.io/x/y`, `server.py`, `mcp-server-git`),
   // not a value given to a flag (`-e GITHUB_TOKEN`).
   const target = positional.find((a) => /[/@.-]/.test(a)) ?? positional[0];
@@ -188,9 +198,14 @@ class Session {
   private readonly setup: RpcMessage[] = [];
   private protocolVersion: string | undefined;
   private readonly pending = new Map<RpcId, Pending>();
-  private readonly internal = new Map<RpcId, (message: RpcMessage) => void>();
-  /** Requests from the server that tomiko replayed: the client's answers to them go nowhere. */
-  private readonly replayedServerRequests = new Set<RpcId>();
+  private readonly internal = new Map<RpcId, { resolve: (message: RpcMessage) => void; reject: (error: unknown) => void }>();
+  /**
+   * Requests from the server that tomiko replayed, waiting for the client's answer, which goes
+   * nowhere: the replay goes on once it comes, as the server did.
+   */
+  private readonly replayedServerRequests = new Map<RpcId, () => void>();
+  /** Requests the client gave up on: what tomiko has to say about them goes unsaid. */
+  private readonly cancelled = new Set<RpcId>();
   private closed = false;
   private notifiedClose = false;
   private counter = 0;
@@ -213,12 +228,30 @@ class Session {
     if (isRequest(message)) return this.request(message, options);
     if (isNotification(message)) {
       if (message.method === INITIALIZED) this.setup.push(message);
+      if (message.method === CANCELLED) this.cancel(message.params?.requestId as RpcId | undefined);
       // In a replayed session the server has nothing to hear: it never saw the handshake.
       if (this.real && this.initialized) await this.forward(message, options);
       return;
     }
-    if (isResponse(message) && this.replayedServerRequests.delete(message.id!)) return;
+    const answered = isResponse(message) ? this.replayedServerRequests.get(message.id!) : undefined;
+    if (answered) {
+      this.replayedServerRequests.delete(message.id!);
+      return answered();
+    }
     if (this.real) await this.forward(message, options);
+  }
+
+  /**
+   * The client gave up on a request (a timeout, an abort). The server won't answer it, so nothing is
+   * recorded for it, and it fails for the cassette like a request that never got its answer.
+   */
+  private cancel(id: RpcId | undefined): void {
+    if (id === undefined) return;
+    this.cancelled.add(id);
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    pending.reject(new TomikoError("The MCP client cancelled the request before the server answered."));
   }
 
   private async request(message: RpcMessage, options: unknown): Promise<void> {
@@ -246,9 +279,11 @@ class Session {
         if (!replayed) return; // Delivered as it came.
         if (HANDSHAKE.has(method)) this.replayedHandshake = true;
         if (method === "initialize") this.learn(exchange.result);
-        this.replay(message, exchange);
+        void this.replay(message, exchange);
       },
       (error: unknown) => {
+        // A client that gave up on the request isn't waiting for word of it.
+        if (this.cancelled.has(message.id!)) return;
         const text = error instanceof Error ? error.message : String(error);
         this.deliver({ jsonrpc: "2.0", id: message.id, error: { code: INTERNAL_ERROR, message: text } });
       },
@@ -289,7 +324,7 @@ class Session {
     this.real ??= bypassed(async () => {
       this.transport.onmessage = ((message: RpcMessage, extra?: unknown) => this.fromServer(message, extra)) as never;
       this.transport.onclose = () => this.realClosed();
-      this.transport.onerror = (error: Error) => this.handlers.onerror?.(error);
+      this.transport.onerror = (error: Error) => unbypassed(() => this.handlers.onerror?.(error));
       await this.transport.start();
       if (this.protocolVersion) this.transport.setProtocolVersion?.(this.protocolVersion);
     });
@@ -311,8 +346,11 @@ class Session {
       }
       const id = `tomiko-${++this.counter}`;
       const answer = await new Promise<RpcMessage>((resolve, reject) => {
-        this.internal.set(id, resolve);
-        this.forward({ ...message, id }).catch(reject);
+        this.internal.set(id, { resolve, reject });
+        this.forward({ ...message, id }).catch((error: unknown) => {
+          this.internal.delete(id);
+          reject(error);
+        });
       });
       const result = answer.result as { protocolVersion?: unknown } | undefined;
       if (message.method === "initialize" && typeof result?.protocolVersion === "string") this.transport.setProtocolVersion?.(result.protocolVersion);
@@ -325,7 +363,7 @@ class Session {
       const internal = this.internal.get(message.id!);
       if (internal) {
         this.internal.delete(message.id!);
-        return internal(message);
+        return internal.resolve(message);
       }
       const pending = this.pending.get(message.id!);
       if (pending) {
@@ -357,19 +395,27 @@ class Session {
     if (typeof name === "string" && name) this.serverName = name;
   }
 
-  /** A recorded outcome, delivered as the server sent it: what came first, then the answer. */
-  private replay(request: RpcMessage, exchange: McpExchange): void {
+  /**
+   * A recorded outcome, delivered as the server sent it: what came first, then the answer. A
+   * request the server made of the client waits for the client's answer, as the server did.
+   */
+  private async replay(request: RpcMessage, exchange: McpExchange): Promise<void> {
     const token = progressToken(request);
-    const messages = (exchange.messages ?? []).flatMap((m): RpcMessage[] => {
+    for (const m of exchange.messages ?? []) {
       if (m.method === "notifications/progress") {
         // Progress goes to the token the client gave this time, and only if it asked for progress.
-        return token === undefined ? [] : [{ ...m, params: { ...m.params, progressToken: token } }];
+        if (token !== undefined) this.deliver({ ...m, params: { ...m.params, progressToken: token } });
+        continue;
       }
-      if (isRequest(m)) this.replayedServerRequests.add(m.id!);
-      return [m];
-    });
-    const answer: RpcMessage = exchange.error ? { jsonrpc: "2.0", id: request.id, error: exchange.error } : { jsonrpc: "2.0", id: request.id, result: exchange.result ?? {} };
-    for (const m of [...messages, answer]) this.deliver(m);
+      if (isRequest(m) && !this.closed) {
+        const answered = new Promise<void>((resolve) => this.replayedServerRequests.set(m.id!, resolve));
+        this.deliver(m);
+        await answered;
+        continue;
+      }
+      this.deliver(m);
+    }
+    this.deliver(exchange.error ? { jsonrpc: "2.0", id: request.id, error: exchange.error } : { jsonrpc: "2.0", id: request.id, result: exchange.result ?? {} });
   }
 
   private readonly outbox: [RpcMessage, unknown][] = [];
@@ -387,20 +433,26 @@ class Session {
 
   private flush(): void {
     const [message, extra] = this.outbox.shift()!;
-    if (!(this.closed && isResponse(message))) this.handlers.onmessage?.(message, extra);
+    // The client's handlers are its own code: what they send goes through the cassette.
+    if (!(this.closed && isResponse(message))) unbypassed(() => this.handlers.onmessage?.(message, extra));
     if (this.outbox.length > 0) setImmediate(() => this.flush());
   }
 
   private realClosed(): void {
-    for (const pending of this.pending.values()) pending.reject(new TomikoError("The MCP connection closed before the server answered."));
+    const closed = () => new TomikoError("The MCP connection closed before the server answered.");
+    for (const pending of this.pending.values()) pending.reject(closed());
     this.pending.clear();
+    for (const waiter of this.internal.values()) waiter.reject(closed());
+    this.internal.clear();
     this.notifyClose();
   }
 
   private notifyClose(): void {
     if (this.notifiedClose) return;
     this.notifiedClose = true;
-    this.handlers.onclose?.();
+    for (const answered of this.replayedServerRequests.values()) answered();
+    this.replayedServerRequests.clear();
+    unbypassed(() => this.handlers.onclose?.());
   }
 
   async close(...args: unknown[]): Promise<void> {

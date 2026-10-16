@@ -54,6 +54,11 @@ export function bypassed<T>(fn: () => T): T {
 
 export const bypassing = (): boolean => bypass.getStore() === true;
 
+/** Runs `fn` back in the open, outside `bypassed()`: code of the caller's own, which tomiko only calls. */
+export function unbypassed<T>(fn: () => T): T {
+  return bypass.exit(fn);
+}
+
 /** The fetch to reach the network: the current global one, unless that is tomiko's dispatcher. */
 export function realFetch(): typeof globalThis.fetch {
   return globalThis.fetch === dispatch ? runtime.native : globalThis.fetch;
